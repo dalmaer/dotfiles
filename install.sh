@@ -54,6 +54,21 @@ done
 [ -d "$HOME/.ssh" ] && run chmod 700 "$HOME/.ssh"
 
 # ----------------------------------------------------------------- links --
+# Bash reads only the FIRST of ~/.bash_profile, ~/.bash_login, ~/.profile.
+# If .bash_profile does not exist yet, linking it silently stops login shells
+# reading the other two -- the only change here that is not a file move.
+if [ ! -e "$HOME/.bash_profile" ] && [ ! -L "$HOME/.bash_profile" ]; then
+  for f in .bash_login .profile; do
+    if [ -f "$HOME/$f" ]; then
+      step "Heads up: ~/$f"
+      warn "bash login shells read ~/$f today. Once ~/.bash_profile exists they"
+      info "       stop reading it. It is left in place (sh and some desktops still"
+      info "       read it), but anything bash needs from it belongs in ~/.env.local."
+      REVIEW_EXTRA="${REVIEW_EXTRA:-}$HOME/$f"$'\n'
+    fi
+  done
+fi
+
 step "Linking config into \$HOME"
 while read -r src dst; do
   case "$src" in ''|\#*) continue ;; esac
@@ -144,6 +159,34 @@ else
   info "No $(_tilde "$SF") on this machine."
   info "API keys go there, one 'export KEY=value' per line, mode 600."
   info "It is never committed and never synced -- copy it across by hand."
+fi
+
+# ---------------------------------------------------------------- review --
+# Replaced files are kept, not deleted -- but anything in them that is not in
+# the repo stops taking effect. Point at exactly what to read.
+review_cmd() {
+  local f="$1" base; base="$(basename "$f")"
+  if [ -f "/etc/skel/$base" ]; then
+    printf '    diff /etc/skel/%s %s    # your additions over the distro default\n' "$base" "$(_tilde "$f")"
+  else
+    printf '    cat %s\n' "$(_tilde "$f")"
+  fi
+}
+ALL_REVIEW="${REPLACED}${REVIEW_EXTRA:-}"
+if [ -n "$ALL_REVIEW" ]; then
+  echo
+  if [ "$DRY_RUN" = "1" ]; then
+    step "Review before applying"
+    info "These stop taking effect. Move anything you still need into a .local file"
+    info "(see README, \"Local override files\"):"
+  else
+    step "Review what was replaced"
+    info "Backed up, not deleted -- but no longer read. Move anything you still"
+    info "need into a .local file (see README, \"Local override files\"):"
+  fi
+  printf '%s' "$ALL_REVIEW" | while IFS= read -r f; do
+    [ -n "$f" ] && review_cmd "$f"
+  done
 fi
 
 echo

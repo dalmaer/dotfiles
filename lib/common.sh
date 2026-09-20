@@ -49,6 +49,7 @@ BACKUP_DIR="${BACKUP_DIR:-$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)}"
 # nothing. run() is the single choke point -- if a helper mutates state, it
 # must go through run() or it will lie in dry-run mode.
 DRY_RUN="${DRY_RUN:-0}"
+REPLACED=""   # newline-separated paths link() moved aside (or would have)
 run() {
   if [ "$DRY_RUN" = "1" ]; then
     printf '  %swould%s %s\n' "$C_YEL" "$C_RESET" "$*"
@@ -73,10 +74,12 @@ link() {
   if [ -e "$dst" ] || [ -L "$dst" ]; then
     if [ "$DRY_RUN" = "1" ]; then
       warn "existing $(_tilde "$dst") would be backed up to $(_tilde "$BACKUP_DIR")/"
+      REPLACED="${REPLACED}${dst}"$'\n'
     else
       mkdir -p "$BACKUP_DIR"
       mv "$dst" "$BACKUP_DIR/$(basename "$dst")"
       warn "backed up $(_tilde "$dst") -> $(_tilde "$BACKUP_DIR")/"
+      REPLACED="${REPLACED}${BACKUP_DIR}/$(basename "$dst")"$'\n'
     fi
   fi
 
