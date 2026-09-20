@@ -1,0 +1,29 @@
+# ~/.bashrc -- read by INTERACTIVE shells.
+#
+# Holds the things that are NOT inherited by child processes and so must be
+# recreated in every shell: aliases, functions, prompt, completion, shopt.
+#
+# Managed by ~/.dotfiles -- edit there, not here.
+
+export DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
+
+# Non-interactive shells (scripts, scp, rsync) stop here. Anything that writes
+# to stdout above this line will corrupt scp and rsync sessions.
+case $- in *i*) ;; *) return ;; esac
+
+# On Linux, a terminal tab is usually a non-login shell, so env.sh has not run
+# yet. On macOS it usually has. The guard makes both paths land in one place.
+if [ -z "${_DOTFILES_ENV_LOADED:-}" ] && [ -r "$DOTFILES/shell/env.sh" ]; then
+  . "$DOTFILES/shell/env.sh"
+fi
+
+for _f in interactive aliases functions; do
+  [ -r "$DOTFILES/shell/$_f.sh" ] && . "$DOTFILES/shell/$_f.sh"
+done
+unset _f
+
+[ -r "$DOTFILES/shell/os/${_DOTFILES_OS}-interactive.sh" ] \
+  && . "$DOTFILES/shell/os/${_DOTFILES_OS}-interactive.sh"
+
+# Machine-specific, never committed. Work aliases, corp hosts, experiments.
+[ -r "$HOME/.shell.local" ] && . "$HOME/.shell.local"

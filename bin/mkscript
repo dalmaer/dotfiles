@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# mkscript <name> [description] -- create a new executable script in ~/bin
+# from a template and open it in $EDITOR.
+set -euo pipefail
+
+name="${1:-}"
+[ -n "$name" ] || { echo "usage: mkscript <name> [description]" >&2; exit 2; }
+desc="${2:-TODO: describe what this does}"
+
+repo="${DOTFILES:-$HOME/.dotfiles}"
+dest="$repo/bin/$name"
+
+[ -e "$dest" ] && { echo "mkscript: $dest already exists" >&2; exit 1; }
+
+cat > "$dest" <<TEMPLATE
+#!/usr/bin/env bash
+# $name -- $desc
+set -euo pipefail
+
+usage() { echo "usage: $name [options]" >&2; exit 2; }
+
+main() {
+  echo "TODO"
+}
+
+main "\$@"
+TEMPLATE
+
+chmod +x "$dest"
+ln -sf "$dest" "$HOME/bin/$name"
+echo "created $dest (linked to ~/bin/$name)"
+exec "${EDITOR:-vi}" "$dest"

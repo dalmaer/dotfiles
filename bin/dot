@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# dot -- manage the dotfiles repo.
+#
+#   dot validate    read-only health check; changes nothing
+#   dot sync        pull, commit local changes, push
+#   dot status      repo status and link summary
+#   dot link        (re)create symlinks        [--dry-run]
+#   dot pull        pull and relink            [--dry-run]
+#   dot push        commit and push
+#   dot edit        open the repo in $EDITOR
+#   dot cd          print the repo path
+#
+# Written for bash 3.2 so it runs on stock macOS as well as Linux.
+
+set -uo pipefail
+
+DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
+[ -d "$DOTFILES" ] || { echo "dot: no dotfiles repo at $DOTFILES" >&2; exit 2; }
+. "$DOTFILES/lib/common.sh"
+
+# ---------------------------------------------------------------- manifest --
+# Emits "src<TAB>dst" lines: the manifest plus everything in bin/.
+manifest() {
+  while read -r src dst; do
+    case "$src" in ''|\#*) continue ;; esac
+    printf '%s\t%s\n' "$src" "${dst/#\~/$HOME}"
+  done < "$DOTFILES/dotfiles.conf"
+
+  local f
+  for f in "$DOTFILES"/bin/*; do
+    [ -f "$f" ] || continue
+    printf 'bin/%s\t%s\n' "$(basename "$f")" "$HOME/bin/$(basename "$f")"
+  done
+}
+
+# -------------------------------------------------------------------- link --
+cmd_link() {
+  [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+  export DRY_RUN
+  [ "$DRY_RUN" = "1" ] && step "Dry run -- nothing will be changed"
+  step "Linking into \$HOME"
+  local src dst
+  while IFS=$'\t' read -r src dst; do
+    link "$src" "$dst"
+  done < <(manifest)
+  [ "$DRY_RUN" = "1" ] || chmod +x "$DOTFILES"/bin/* 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------- validate --
+# STRICTLY READ-ONLY. Inspects and reports. Never creates, moves, or removes
+# anything. Safe to run on a machine that is already set up.
+#   exit 0  all good
+#   exit 1  warnings only
+#   exit 2  errors found
+cmd_validate() {
+  local errs=0 warns=0
+  _err()  { printf '  %sFAIL%s %s\n' "$C_RED" "$C_RESET" "$*"; errs=$((errs+1)); }
+  _warn() { printf '  %sWARN%s %s\n' "$C_YEL" "$C_RESET" "$*"; warns=$((warns+1)); }
+  _ok()   { printf '  %sok%s   %s\n' "$C_GRN" "$C_RESET" "$*"; }
+  _note() { printf '  %s     %s%s\n' "$C_DIM" "$*" "$C_RESET"; }
+
+  printf '%s\n' "${C_DIM}read-only -- this command changes nothing${C_RESET}"
+  echo
+
+  step "Platform"
+  _ok "$OS/$ARCH, bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"
+  if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    _note "bash 3.2 -- globstar/autocd are skipped. 'brew install bash' for 5.x."
+  fi
+
+  step "Repo"
+  if git -C "$DOTFILES" rev-parse --git-dir >/dev/null 2>&1; then
+    _ok "git repo at $(_tilde "$DOTFILES")"
+    local remote; remote="$(git -C "$DOTFILES" remote get-url origin 2>/dev/null)"
+    [ -n "$remote" ] && _ok "origin $remote" || _warn "no 'origin' remote -- 'dot sync' cannot push"
+  else
+    _err "$(_tilde "$DOTFILES") is not a git repo"
+  fi
+
+  step "Symlinks"
+  local src dst target
+  while IFS=$'\t' read -r src dst; do
+    if [ ! -e "$DOTFILES/$src" ]; then
+      _err "$src is in the manifest but missing from the repo"
+    elif [ -L "$dst" ]; then
+      target="$(_resolve "$dst")"
+      if [ "$target" = "$(_resolve "$DOTFILES/$src")" ]; then
+        _ok "$(_tilde "$dst")"
+      else
+        _err "$(_tilde "$dst") is a symlink to $target, expected $src"
+      fi
+    elif [ -e "$dst" ]; then
+      _err "$(_tilde "$dst") is a real file, not a link -- 'dot link' will back it up and replace it"
+    else
+      _warn "$(_tilde "$dst") is missing -- run 'dot link'"
+    fi
+  done < <(manifest)
+
+  step "Broken links in \$HOME and ~/bin"
+  local l found=0
+  for l in "$HOME"/.[!.]* "$HOME"/bin/*; do
+    [ -L "$l" ] || continue
+    [ -e "$l" ] && continue
+    case "$(readlink "$l")" in
+      *"$(basename "$DOTFILES")"*) _err "dangling: $(_tilde "$l") -> $(readlink "$l")"; found=1 ;;
+      *) _warn "dangling (not ours): $(_tilde "$l") -> $(readlink "$l")"; found=1 ;;
+    esac
+  done
+  [ "$found" = "0" ] && _ok "none"
+
+  step "PATH"
+  case ":$PATH:" in
+    *":$HOME/bin:"*) _ok "~/bin is on PATH" ;;
+    *) _warn "~/bin is not on PATH -- open a new shell, or run 'exec \$SHELL -l'" ;;
+  esac
+  if command -v dot >/dev/null 2>&1; then
+    _ok "dot resolves to $(command -v dot)"
+  else
+    _warn "'dot' is not on PATH yet"
+  fi
+
+  step "Shell wiring"
+  if [ -r "$HOME/.bash_profile" ] && grep -q 'bashrc' "$HOME/.bash_profile" 2>/dev/null; then
+    _ok ".bash_profile hands off to .bashrc"
+  else
+    _err ".bash_profile does not source .bashrc -- non-login shells will differ"
+  fi
+  if [ -r "$HOME/.bashrc" ] && grep -q 'case \$- in' "$HOME/.bashrc" 2>/dev/null; then
+    _ok ".bashrc guards against non-interactive shells"
+  else
+    _warn ".bashrc has no interactive guard -- may break scp/rsync"
+  fi
+
+  step "Local override files"
+  _check_local() {
+    local path="$1" required="$2" what="$3"
+    if [ -e "$path" ]; then
+      _ok "$(_tilde "$path") -- $what"
+    elif [ "$required" = "required" ]; then
+      _err "$(_tilde "$path") is missing -- $what"
+    else
+      _note "$(_tilde "$path") absent (optional) -- $what"
+    fi
+  }
+  _check_local "$HOME/.shell.local"      optional "interactive: work aliases, functions"
+  _check_local "$HOME/.env.local"        optional "login: machine-specific exports and PATH"
+  _check_local "$HOME/.gitconfig.local"  optional "git identity and work overrides"
+  _check_local "$HOME/.ssh/config.local" optional "internal hosts and jump boxes"
+  _check_local "$HOME/.config/secrets.env" optional "API keys"
+
+  step "Secret hygiene"
+  local sf="$HOME/.config/secrets.env"
+  if [ -e "$sf" ]; then
+    local mode; mode="$(stat -f '%Lp' "$sf" 2>/dev/null || stat -c '%a' "$sf" 2>/dev/null)"
+    if [ "$mode" = "600" ]; then _ok "secrets.env is mode 600"
+    else _err "secrets.env is mode $mode -- should be 600. Fix: chmod 600 $(_tilde "$sf")"; fi
+    # A stray line that is neither a comment nor an assignment gets executed
+    # when the file is sourced. Capture rather than use `grep -qv`: BSD grep
+    # does not report -q and -v together the way GNU grep does.
+    local stray
+    stray="$(grep -nvE '^[[:space:]]*(#|$)' "$sf" 2>/dev/null \
+             | grep -vE '^[0-9]+:[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' || true)"
+    if [ -n "$stray" ]; then
+      _err "secrets.env has a line that is neither a comment nor an assignment; sourcing it runs that line as a command"
+      printf '%s\n' "$stray" | cut -c1-60 | sed 's/^/         line /'
+    else
+      _ok "secrets.env contains only comments and assignments"
+    fi
+  fi
+
+  local never="secrets.env .npmrc .env.local .shell.local gitconfig.local"
+  local n tracked=0
+  for n in $never; do
+    if git -C "$DOTFILES" ls-files --error-unmatch "*$n" >/dev/null 2>&1; then
+      _err "$n is TRACKED in the repo -- it must never be committed"
+      tracked=1
+    fi
+  done
+  [ "$tracked" = "0" ] && _ok "no never-commit files are tracked"
+
+  if git -C "$DOTFILES" rev-parse --git-dir >/dev/null 2>&1; then
+    local hits
+    hits="$(git -C "$DOTFILES" grep -nIE \
+      '(sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|AIza[A-Za-z0-9_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[A-Za-z0-9-]{10,})' \
+      -- . 2>/dev/null | grep -v '^bin/dot:' || true)"
+    if [ -n "$hits" ]; then
+      _err "possible secret committed in the repo:"
+      printf '%s\n' "$hits" | cut -c1-100 | sed 's/^/         /'
+    else
+      _ok "no key-shaped strings in tracked files"
+    fi
+  fi
+
+  step "Tools"
+  local t
+  for t in git gh; do
+    command -v "$t" >/dev/null 2>&1 && _ok "$t" || _err "$t not installed (required)"
+  done
+  for t in starship fnm rsync curl; do
+    command -v "$t" >/dev/null 2>&1 && _ok "$t" || _note "$t not installed (optional)"
+  done
+
+  step "Sync state"
+  if git -C "$DOTFILES" rev-parse --git-dir >/dev/null 2>&1; then
+    if [ -n "$(git -C "$DOTFILES" status --porcelain 2>/dev/null)" ]; then
+      _warn "uncommitted changes -- run 'dot sync'"
+      git -C "$DOTFILES" status --short | sed 's/^/         /'
+    else
+      _ok "working tree clean"
+    fi
+    git -C "$DOTFILES" fetch --quiet origin >/dev/null 2>&1 || true
+    local ahead behind
+    ahead="$(git -C "$DOTFILES" rev-list --count @{u}..HEAD 2>/dev/null || echo 0)"
+    behind="$(git -C "$DOTFILES" rev-list --count HEAD..@{u} 2>/dev/null || echo 0)"
+    [ "${ahead:-0}" -gt 0 ] && _warn "$ahead commit(s) not pushed -- run 'dot sync'"
+    [ "${behind:-0}" -gt 0 ] && _warn "$behind commit(s) to pull -- run 'dot sync'"
+    [ "${ahead:-0}" = "0" ] && [ "${behind:-0}" = "0" ] && _ok "in sync with origin"
+  fi
+
+  echo
+  if   [ "$errs" -gt 0 ]; then printf '%sFAIL%s  %d error(s), %d warning(s)\n' "$C_RED" "$C_RESET" "$errs" "$warns"; return 2
+  elif [ "$warns" -gt 0 ]; then printf '%sOK%s    %d warning(s), no errors\n' "$C_YEL" "$C_RESET" "$warns"; return 1
+  else printf '%sOK%s    everything checks out\n' "$C_GRN" "$C_RESET"; return 0; fi
+}
+
+# -------------------------------------------------------------------- sync --
+cmd_sync() {
+  [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+  export DRY_RUN
+  [ "$DRY_RUN" = "1" ] && step "Dry run -- nothing will be changed"
+  cd "$DOTFILES" || exit 2
+
+  step "Pulling"
+  run git pull --rebase --autostash origin "$(git branch --show-current)" || {
+    die "pull failed -- resolve it in $(_tilde "$DOTFILES") and run 'dot sync' again"
+  }
+
+  if [ -n "$(git status --porcelain)" ]; then
+    step "Committing local changes"
+    git status --short | sed 's/^/  /'
+    run git add -A
+    run git commit -m "dotfiles: sync from $(hostname -s) on $(date '+%Y-%m-%d %H:%M')"
+  else
+    skip "nothing to commit"
+  fi
+
+  step "Pushing"
+  run git push origin "$(git branch --show-current)"
+
+  step "Relinking"
+  cmd_link ${DRY_RUN:+--dry-run}
+  echo
+  info "Done. Open a new shell or run: exec \$SHELL -l"
+}
+
+cmd_pull() {
+  cd "$DOTFILES" || exit 2
+  step "Pulling"; run git pull --rebase --autostash
+  cmd_link "$@"
+}
+cmd_push() {
+  cd "$DOTFILES" || exit 2
+  [ -z "$(git status --porcelain)" ] && { info "nothing to push"; return 0; }
+  git status --short | sed 's/^/  /'
+  run git add -A
+  run git commit -m "dotfiles: update from $(hostname -s) on $(date '+%Y-%m-%d %H:%M')"
+  run git push
+}
+cmd_status() {
+  cd "$DOTFILES" || exit 2
+  step "$(_tilde "$DOTFILES")"; git status --short --branch
+}
+cmd_edit() { "${EDITOR:-vi}" "$DOTFILES"; }
+cmd_cd()   { printf '%s\n' "$DOTFILES"; }
+
+cmd_help() {
+  sed -n '2,20p' "$(_resolve "${BASH_SOURCE[0]}")" | sed 's/^# \{0,1\}//'
+}
+
+case "${1:-help}" in
+  validate|check|doctor) shift; cmd_validate "$@" ;;
+  sync)                  shift; cmd_sync "$@" ;;
+  link)                  shift; cmd_link "$@" ;;
+  pull)                  shift; cmd_pull "$@" ;;
+  push)                  shift; cmd_push "$@" ;;
+  status|st)             shift; cmd_status "$@" ;;
+  edit)                  shift; cmd_edit "$@" ;;
+  cd|path)               shift; cmd_cd "$@" ;;
+  help|-h|--help)        cmd_help ;;
+  *) echo "dot: unknown command '$1'" >&2; echo; cmd_help; exit 2 ;;
+esac

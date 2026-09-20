@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# ports [port] -- show what is listening, on macOS or Linux.
+set -uo pipefail
+
+filter="${1:-}"
+
+if command -v lsof >/dev/null 2>&1; then
+  if [ -n "$filter" ]; then
+    lsof -nP -iTCP:"$filter" -sTCP:LISTEN
+  else
+    lsof -nP -iTCP -sTCP:LISTEN
+  fi
+elif command -v ss >/dev/null 2>&1; then
+  if [ -n "$filter" ]; then
+    ss -tlnp "sport = :$filter"
+  else
+    ss -tlnp
+  fi
+elif command -v netstat >/dev/null 2>&1; then
+  netstat -tlnp 2>/dev/null | { [ -n "$filter" ] && grep ":$filter " || cat; }
+else
+  echo "ports: needs lsof, ss, or netstat" >&2
+  exit 1
+fi

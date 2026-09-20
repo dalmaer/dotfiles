@@ -1,0 +1,6 @@
+# Nothing machine-specific or secret belongs in this repo.
+*.local
+secrets.env
+.npmrc
+.DS_Store
+*.swp

@@ -1,0 +1,16 @@
+# ~/.bash_profile -- read by LOGIN shells only.
+#
+# Bash reads this for login shells (ssh, `bash -l`, every Terminal.app tab on
+# macOS) and does NOT read ~/.bashrc for them. So this file does two jobs:
+#   1. set up the environment that children inherit (PATH, exported vars)
+#   2. hand off to ~/.bashrc so login and non-login shells end up identical
+#
+# Managed by ~/.dotfiles -- edit there, not here.
+
+export DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
+
+# Inheritable environment: PATH, exported vars, anything slow we want once.
+[ -r "$DOTFILES/shell/env.sh" ] && . "$DOTFILES/shell/env.sh"
+
+# Everything a login shell also needs as an interactive shell.
+[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"

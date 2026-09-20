@@ -1,0 +1,70 @@
+# Managed by ~/.dotfiles. Machine- and work-specific settings (a different
+# email, corp URL rewrites, proxies) go in ~/.gitconfig.local -- see the
+# [include] at the bottom of this file.
+
+[user]
+	name = Dion Almaer
+	email = dion@almaer.com
+
+[init]
+	defaultBranch = main
+
+[core]
+	excludesfile = ~/.gitignore_global
+	autocrlf = input
+	fsmonitor = true
+	untrackedCache = true
+
+[pull]
+	rebase = true
+[push]
+	default = current
+	autoSetupRemote = true
+[fetch]
+	prune = true
+[rebase]
+	autoStash = true
+[merge]
+	conflictstyle = zdiff3
+[diff]
+	algorithm = histogram
+	colorMoved = default
+[rerere]
+	enabled = true
+[column]
+	ui = auto
+[branch]
+	sort = -committerdate
+
+[alias]
+	st = status
+	co = checkout
+	br = branch
+	ci = commit
+	unstage = reset HEAD --
+	last = log -1 HEAD
+	lg = log --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit
+	recent = log -10 HEAD
+	aa = add .
+	cm = commit -m
+	amend = commit --amend
+	undo = reset --soft HEAD^
+
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true
+
+# Resolved via PATH rather than /opt/homebrew/bin/gh, which does not exist on
+# Linux or on Intel Macs.
+[credential "https://github.com"]
+	helper =
+	helper = !gh auth git-credential
+[credential "https://gist.github.com"]
+	helper =
+	helper = !gh auth git-credential
+
+# Last include wins, so ~/.gitconfig.local can override anything above it.
+[include]
+	path = ~/.gitconfig.local

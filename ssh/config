@@ -1,0 +1,24 @@
+# Managed by ~/.dotfiles.
+#
+# ssh uses the FIRST value it finds for any keyword, so the include below must
+# stay at the top: it lets ~/.ssh/config.local override everything here.
+# Work hosts, jump boxes, and anything with an internal hostname belong there.
+
+Include config.local
+
+Host *
+	AddKeysToAgent yes
+	ServerAliveInterval 60
+	ServerAliveCountMax 3
+	TCPKeepAlive yes
+	HashKnownHosts yes
+	StrictHostKeyChecking ask
+
+	# Reuse one connection for repeated sessions to the same host.
+	ControlMaster auto
+	ControlPath ~/.ssh/sockets/%r@%h-%p
+	ControlPersist 600
+
+Host github.com
+	User git
+	PreferredAuthentications publickey

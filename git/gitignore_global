@@ -1,0 +1,37 @@
+# Global ignores -- things that should never land in any repo, anywhere.
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.directory
+.fuse_hidden*
+.nfs*
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-workspace
+
+# Env and secrets -- belt and braces; these should never be in a repo.
+.env
+.env.local
+.env.*.local
+secrets.env
+*.pem
+*.key
+
+# Build noise
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+dist/
