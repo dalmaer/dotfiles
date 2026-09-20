@@ -248,7 +248,9 @@ cmd_sync() {
   run git push origin "$(git branch --show-current)"
 
   step "Relinking"
-  cmd_link ${DRY_RUN:+--dry-run}
+  # Not ${DRY_RUN:+--dry-run}: DRY_RUN is "0" when off, which is non-empty
+  # and would make every sync a dry run.
+  if [ "$DRY_RUN" = "1" ]; then cmd_link --dry-run; else cmd_link; fi
   echo
   info "Done. Open a new shell or run: exec \$SHELL -l"
 }
