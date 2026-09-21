@@ -35,6 +35,9 @@ alias g='git'
 alias gs='git status -sb'
 alias gd='git diff'
 alias gl='git lg'
+alias main='git switch main'
+alias pull='git pull'
+alias merges='gh pr list --base main --state merged --limit 5'
 
 # --- Misc ---------------------------------------------------------------
 alias path='printf "%s\n" $PATH | tr ":" "\n"'

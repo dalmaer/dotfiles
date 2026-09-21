@@ -24,12 +24,14 @@ DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
 manifest() {
   while read -r src dst; do
     case "$src" in ''|\#*) continue ;; esac
+    should_skip "$src" && continue
     printf '%s\t%s\n' "$src" "${dst/#\~/$HOME}"
   done < "$DOTFILES/dotfiles.conf"
 
   local f
   for f in "$DOTFILES"/bin/*; do
     [ -f "$f" ] || continue
+    should_skip "bin/$(basename "$f")" && continue
     printf 'bin/%s\t%s\n' "$(basename "$f")" "$HOME/bin/$(basename "$f")"
   done
 }
@@ -96,6 +98,15 @@ cmd_validate() {
       _warn "$(_tilde "$dst") is missing -- run 'dot link'"
     fi
   done < <(manifest)
+
+  if [ -r "$SKIP_FILE" ]; then
+    step "Not linked on this machine (~/.dotfiles.skip)"
+    local sl
+    while IFS= read -r sl || [ -n "$sl" ]; do
+      case "$sl" in ''|\#*) continue ;; esac
+      _note "$sl"
+    done < "$SKIP_FILE"
+  fi
 
   step "Broken links in \$HOME and ~/bin"
   local l found=0
@@ -198,7 +209,7 @@ cmd_validate() {
     local hits
     hits="$(git -C "$DOTFILES" grep -nIE \
       '(sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|AIza[A-Za-z0-9_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[A-Za-z0-9-]{10,})' \
-      -- . 2>/dev/null | grep -v '^bin/dot:' || true)"
+      -- . 2>/dev/null || true)"
     if [ -n "$hits" ]; then
       _err "possible secret committed in the repo:"
       printf '%s\n' "$hits" | cut -c1-100 | sed 's/^/         /'
@@ -255,6 +266,18 @@ cmd_sync() {
     step "Committing local changes"
     git status --short | sed 's/^/  /'
     run git add -A
+    # Last line of defence before a public push. `git add -A` is blind, and a
+    # tool on this machine may have written into a tracked file.
+    if [ "$DRY_RUN" != "1" ]; then
+      local leaked
+      leaked="$(git diff --cached | grep -E '^\+' \
+        | grep -EI '(sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|AIza[A-Za-z0-9_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|_authToken=[A-Za-z0-9._%+-]{8,})' || true)"
+      if [ -n "$leaked" ]; then
+        printf '%s\n' "${C_RED}refusing to commit -- this looks like a credential:${C_RESET}"
+        printf '%s\n' "$leaked" | cut -c1-100 | sed 's/^/  /'
+        die "unstage it (git -C $(_tilde "$DOTFILES") reset) and remove the secret, or add the file to ~/.dotfiles.skip"
+      fi
+    fi
     run git commit -m "dotfiles: sync from $(hostname -s) on $(date '+%Y-%m-%d %H:%M')"
   else
     skip "nothing to commit"

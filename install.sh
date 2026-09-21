@@ -73,12 +73,14 @@ fi
 step "Linking config into \$HOME"
 while read -r src dst; do
   case "$src" in ''|\#*) continue ;; esac
+  if should_skip "$src"; then skip "$src (listed in ~/.dotfiles.skip)"; continue; fi
   link "$src" "${dst/#\~/$HOME}"
 done < "$DOTFILES/dotfiles.conf"
 
 step "Linking scripts into ~/bin"
 for f in "$DOTFILES"/bin/*; do
   [ -f "$f" ] || continue
+  if should_skip "bin/$(basename "$f")"; then skip "bin/$(basename "$f") (listed in ~/.dotfiles.skip)"; continue; fi
   [ "$DRY_RUN" = "1" ] || chmod +x "$f"
   link "bin/$(basename "$f")" "$HOME/bin/$(basename "$f")"
 done

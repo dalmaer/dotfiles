@@ -105,6 +105,26 @@ unconditionally.
 `export KEY=value` lines. Any other line is executed as a command when the
 file is sourced. `dot validate` checks for this.
 
+## Opting out on one machine
+
+`~/.dotfiles.skip` lists repo-relative paths this machine must not link, one
+per line:
+
+```
+ssh/config
+```
+
+This exists for files that **another tool on the box writes to**. Corp tooling
+that appends to `~/.ssh/config`, for instance, would be writing into the repo
+once that path is a symlink — and `dot sync` commits with `git add -A` and
+pushes to a public remote. Skipping the entry leaves the real file alone.
+
+`install.sh` and `dot link` honour the list, and `dot validate` prints what is
+being skipped so it never becomes invisible.
+
+As a backstop, `dot sync` scans staged changes for credential-shaped strings
+and refuses to commit if it finds one.
+
 ## The `dot` command
 
 | Command | What it does |

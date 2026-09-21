@@ -40,6 +40,22 @@ die()  { printf '%s\n' "${C_RED}error${C_RESET} $*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# --- Per-machine opt-out -------------------------------------------------
+# ~/.dotfiles.skip lists repo-relative paths this machine must NOT link, one
+# per line. For files another tool on the box writes to: linking them would
+# send those writes into the repo, and `dot sync` would push them.
+SKIP_FILE="${SKIP_FILE:-$HOME/.dotfiles.skip}"
+should_skip() {
+  [ -r "$SKIP_FILE" ] || return 1
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    line="${line%"${line##*[![:space:]]}"}"
+    [ "$line" = "$1" ] && return 0
+  done < "$SKIP_FILE"
+  return 1
+}
+
 # --- Symlinking ---------------------------------------------------------
 # link <repo-relative-source> <absolute-target>
 # Idempotent. Backs up anything real that is already in the way.

@@ -34,6 +34,11 @@ shell on next login, on every machine they sync to. Treat changes accordingly.
    mutating step, route it through `run()` in `lib/common.sh` or dry-run will
    silently lie.
 
+5. **Respect `~/.dotfiles.skip`.** It lists repo-relative paths a given
+   machine must not link, for files some other tool writes to. Any new code
+   that links or inspects manifest entries must call `should_skip` first, or
+   it will fight that tool and push its writes to a public remote.
+
 ## Conventions
 
 **Target bash 3.2.** Stock macOS ships bash 3.2.57. No associative arrays, no
