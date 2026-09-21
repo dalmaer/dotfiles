@@ -1,4 +1,8 @@
 # Nothing machine-specific or secret belongs in this repo.
+
+# install.sh backups. These hold whatever was on the machine before, which on
+# a work box can mean internal hostnames or exported keys. Never commit them.
+backup/
 *.local
 secrets.env
 .npmrc

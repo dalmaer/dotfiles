@@ -23,8 +23,11 @@ shell on next login, on every machine they sync to. Treat changes accordingly.
    `~/.ssh/config.local`), which are never committed.
 
 3. **Never delete a user file.** `install.sh` moves anything in the way to
-   `~/.dotfiles-backup/<timestamp>/`. Any new code that replaces a file must do
-   the same. `dot validate` is strictly read-only and must stay that way.
+   `backup/<timestamp>/` inside the repo, keeping the path relative to `$HOME`
+   so two files with the same basename cannot collide. Any new code that
+   replaces a file must do the same. `backup/` is gitignored and must stay
+   that way: a backed-up shell config can carry internal hostnames or exported
+   keys, and this repo is public. `dot validate` is strictly read-only.
 
 4. **Preview before applying.** `./install.sh --dry-run` and
    `dot link --dry-run` must show every change and make none. If you add a

@@ -19,8 +19,14 @@ dot validate               # confirm
 ```
 
 `install.sh` is idempotent and never deletes. Any real file already sitting at
-a target path is moved to `~/.dotfiles-backup/<timestamp>/` before the symlink
-goes in.
+a target path is moved to `backup/<timestamp>/` inside the repo before the
+symlink goes in, keeping its path relative to `$HOME` — so `~/.ssh/config`
+lands at `backup/<timestamp>/.ssh/config` and cannot collide with another file
+of the same name. `dot backups` lists them.
+
+`backup/` is gitignored. It has to be: a backed-up shell config can contain
+internal hostnames or exported keys, and this repo is public. `dot validate`
+fails if anything under `backup/` is ever tracked.
 
 ## Layout
 
@@ -109,6 +115,7 @@ file is sourced. `dot validate` checks for this.
 | `dot link [--dry-run]` | Recreate symlinks |
 | `dot pull` / `dot push` | Halves of sync |
 | `dot edit` | Open the repo in `$EDITOR` |
+| `dot backups` | List `install.sh` backups and what is in them |
 | `dot cd` | Print the repo path (`cd "$(dot cd)"`) |
 
 Typical loop: change something, `dot sync` here, `dot sync` on the other box.

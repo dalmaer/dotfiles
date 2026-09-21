@@ -6,7 +6,8 @@
 #   ./install.sh --no-stubs   link only; do not create ~/.*.local files
 #
 # Idempotent: safe to run repeatedly. Never deletes anything -- any real file
-# already sitting at a target path is moved to ~/.dotfiles-backup/<timestamp>/.
+# already sitting at a target path is moved to backup/<timestamp>/ inside the
+# repo, keeping its path relative to $HOME. Backups are gitignored.
 set -uo pipefail
 
 DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

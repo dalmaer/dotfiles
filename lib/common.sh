@@ -43,7 +43,10 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # --- Symlinking ---------------------------------------------------------
 # link <repo-relative-source> <absolute-target>
 # Idempotent. Backs up anything real that is already in the way.
-BACKUP_DIR="${BACKUP_DIR:-$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)}"
+# Backups live inside the repo so they sit next to what replaced them.
+# .gitignore excludes backup/ -- it must never be committed, since a
+# backed-up shell config can carry internal hostnames or exported keys.
+BACKUP_DIR="${BACKUP_DIR:-$DOTFILES/backup/$(date +%Y%m%d-%H%M%S)}"
 
 # DRY_RUN=1 makes every mutating helper print what it would do and change
 # nothing. run() is the single choke point -- if a helper mutates state, it
@@ -76,10 +79,14 @@ link() {
       warn "existing $(_tilde "$dst") would be backed up to $(_tilde "$BACKUP_DIR")/"
       REPLACED="${REPLACED}${dst}"$'\n'
     else
-      mkdir -p "$BACKUP_DIR"
-      mv "$dst" "$BACKUP_DIR/$(basename "$dst")"
-      warn "backed up $(_tilde "$dst") -> $(_tilde "$BACKUP_DIR")/"
-      REPLACED="${REPLACED}${BACKUP_DIR}/$(basename "$dst")"$'\n'
+      # Keep the path relative to $HOME, so ~/.ssh/config and ~/.config/config
+      # cannot overwrite each other inside one backup dir.
+      local rel="${dst#$HOME/}"
+      case "$rel" in /*) rel="$(basename "$dst")" ;; esac
+      mkdir -p "$BACKUP_DIR/$(dirname "$rel")"
+      mv "$dst" "$BACKUP_DIR/$rel"
+      warn "backed up $(_tilde "$dst") -> $(_tilde "$BACKUP_DIR")/$rel"
+      REPLACED="${REPLACED}${BACKUP_DIR}/${rel}"$'\n'
     fi
   fi
 

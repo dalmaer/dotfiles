@@ -8,6 +8,7 @@
 #   dot pull        pull and relink            [--dry-run]
 #   dot push        commit and push
 #   dot edit        open the repo in $EDITOR
+#   dot backups     list install.sh backups, newest first
 #   dot cd          print the repo path
 #
 # Written for bash 3.2 so it runs on stock macOS as well as Linux.
@@ -168,6 +169,21 @@ cmd_validate() {
     fi
   fi
 
+  local bt
+  bt="$(git -C "$DOTFILES" ls-files -- 'backup/*' 2>/dev/null | head -5)"
+  if [ -n "$bt" ]; then
+    _err "backup files are TRACKED -- they can hold internal hosts or keys:"
+    printf '%s\n' "$bt" | sed 's/^/         /'
+    _err "fix: git -C $(_tilde "$DOTFILES") rm -r --cached backup && dot sync"
+  else
+    local nb; nb="$(find "$DOTFILES/backup" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$nb" -gt 0 ]; then
+      _ok "$nb backup dir(s), none tracked -- 'dot backups' to list"
+    else
+      _ok "no backup dirs"
+    fi
+  fi
+
   local never="secrets.env .npmrc .env.local .shell.local gitconfig.local"
   local n tracked=0
   for n in $never; do
@@ -272,6 +288,18 @@ cmd_status() {
   cd "$DOTFILES" || exit 2
   step "$(_tilde "$DOTFILES")"; git status --short --branch
 }
+cmd_backups() {
+  local found=0 d
+  for d in "$DOTFILES"/backup/*/; do
+    [ -d "$d" ] || continue
+    found=1
+    printf '  %s  (%s file(s))\n' "$(basename "$d")" "$(find "$d" -type f | wc -l | tr -d ' ')"
+    find "$d" -type f | sed "s|^$d|      |"
+  done
+  [ "$found" = "0" ] && info "no backups in $(_tilde "$DOTFILES")"
+  return 0
+}
+
 cmd_edit() { "${EDITOR:-vi}" "$DOTFILES"; }
 cmd_cd()   { printf '%s\n' "$DOTFILES"; }
 
@@ -287,6 +315,7 @@ case "${1:-help}" in
   push)                  shift; cmd_push "$@" ;;
   status|st)             shift; cmd_status "$@" ;;
   edit)                  shift; cmd_edit "$@" ;;
+  backups)               shift; cmd_backups "$@" ;;
   cd|path)               shift; cmd_cd "$@" ;;
   help|-h|--help)        cmd_help ;;
   *) echo "dot: unknown command '$1'" >&2; echo; cmd_help; exit 2 ;;
