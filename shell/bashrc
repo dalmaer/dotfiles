@@ -17,7 +17,7 @@ if [ -z "${_DOTFILES_ENV_LOADED:-}" ] && [ -r "$DOTFILES/shell/env.sh" ]; then
   . "$DOTFILES/shell/env.sh"
 fi
 
-for _f in interactive aliases functions; do
+for _f in bash-interactive aliases functions; do
   [ -r "$DOTFILES/shell/$_f.sh" ] && . "$DOTFILES/shell/$_f.sh"
 done
 unset _f

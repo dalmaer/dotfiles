@@ -1,0 +1,15 @@
+# ~/.zprofile -- read by LOGIN zsh shells.
+#
+# zsh reads .zprofile and then .zshrc for a login shell, so unlike bash there
+# is no hand-off to do here: this file only sets up the inherited environment.
+#
+# Why here and not ~/.zshenv: on macOS, /etc/zprofile runs path_helper AFTER
+# ~/.zshenv, and path_helper rebuilds PATH with the system directories first.
+# Anything prepended in .zshenv ends up behind /usr/bin. This file runs after
+# /etc/zprofile, so what env.sh puts in front stays in front.
+#
+# Managed by ~/.dotfiles -- edit there, not here.
+
+export DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
+
+[ -r "$DOTFILES/shell/env.sh" ] && . "$DOTFILES/shell/env.sh"

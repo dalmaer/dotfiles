@@ -132,16 +132,49 @@ cmd_validate() {
   fi
 
   step "Shell wiring"
-  if [ -r "$HOME/.bash_profile" ] && grep -q 'bashrc' "$HOME/.bash_profile" 2>/dev/null; then
-    _ok ".bash_profile hands off to .bashrc"
+  if [ "$(cd "$DOTFILES" && pwd -P)" = "$(cd "$HOME/.dotfiles" 2>/dev/null && pwd -P)" ]; then
+    _ok "repo is at ~/.dotfiles, where the rc files look for it"
   else
-    _err ".bash_profile does not source .bashrc -- non-login shells will differ"
+    _err "repo is at $(_tilde "$DOTFILES"), but the rc files look in ~/.dotfiles -- nothing will load"
   fi
-  if [ -r "$HOME/.bashrc" ] && grep -q 'case \$- in' "$HOME/.bashrc" 2>/dev/null; then
-    _ok ".bashrc guards against non-interactive shells"
-  else
-    _warn ".bashrc has no interactive guard -- may break scp/rsync"
-  fi
+
+  local lsh; lsh="$(basename "${SHELL:-unknown}")"
+  case "$lsh" in
+    bash)
+      _ok "login shell is bash"
+      if [ -r "$HOME/.bash_profile" ] && grep -q 'bashrc' "$HOME/.bash_profile" 2>/dev/null; then
+        _ok ".bash_profile hands off to .bashrc"
+      else
+        _err ".bash_profile does not source .bashrc -- non-login shells will differ"
+      fi
+      if [ -r "$HOME/.bashrc" ] && grep -q 'case \$- in' "$HOME/.bashrc" 2>/dev/null; then
+        _ok ".bashrc guards against non-interactive shells"
+      else
+        _warn ".bashrc has no interactive guard -- may break scp/rsync"
+      fi
+      ;;
+    zsh)
+      _ok "login shell is zsh"
+      if [ -r "$HOME/.zprofile" ] && grep -q 'env.sh' "$HOME/.zprofile" 2>/dev/null; then
+        _ok ".zprofile loads env.sh"
+      else
+        _err ".zprofile does not load env.sh -- PATH and exports will be missing"
+      fi
+      if [ -r "$HOME/.zshrc" ] && grep -q 'zsh-interactive' "$HOME/.zshrc" 2>/dev/null; then
+        _ok ".zshrc loads the zsh layer"
+      else
+        _err ".zshrc does not load zsh-interactive.zsh -- no aliases, prompt or completion"
+      fi
+      # macOS path_helper runs after .zshenv and puts system dirs first.
+      if [ "$OS" = "darwin" ] && [ -r "$HOME/.zshenv" ] \
+         && grep -qE '(^|[^A-Za-z_])PATH=|path_prepend' "$HOME/.zshenv" 2>/dev/null; then
+        _warn "~/.zshenv sets PATH; on macOS path_helper reorders it afterwards. Move it to ~/.env.local"
+      fi
+      ;;
+    *)
+      _warn "login shell is $lsh -- this config only loads under bash or zsh"
+      ;;
+  esac
 
   step "Local override files"
   _check_local() {

@@ -1,5 +1,5 @@
-# Interactive-shell behaviour: shell options, completion, prompt.
-# Re-run in every interactive shell. Nothing here is inherited by children.
+# Interactive bash: shell options, completion, prompt.
+# The bash counterpart of zsh-interactive.zsh. Runs in every interactive shell.
 
 # --- Shell options ------------------------------------------------------
 shopt -s checkwinsize          # keep $LINES/$COLUMNS right after a resize

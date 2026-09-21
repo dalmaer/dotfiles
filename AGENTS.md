@@ -41,9 +41,30 @@ shell on next login, on every machine they sync to. Treat changes accordingly.
 
 ## Conventions
 
-**Target bash 3.2.** Stock macOS ships bash 3.2.57. No associative arrays, no
-`mapfile`, no `${var^^}`, no `&>>`. Guard bash 4+ features behind
-`[ "${BASH_VERSINFO[0]}" -ge 4 ]`, as `shell/interactive.sh` does.
+**Shared shell files must run in bash 3.2 *and* zsh 5.** `env.sh`,
+`aliases.sh`, `functions.sh` and everything in `shell/os/` are sourced by both
+shells. Stock macOS ships bash 3.2.57: no associative arrays, no `mapfile`, no
+`${var^^}`, no `&>>`. And zsh differs in ways that parse cleanly and then
+misbehave:
+
+- Unmatched globs are an error in zsh by default (`zsh-interactive.zsh` turns
+  that off interactively, but shared files are also sourced before it runs).
+  Avoid bare globs in shared files.
+- Anything that locates itself with `$BASH_SOURCE` breaks under zsh, where it
+  is empty. gcloud's `path.bash.inc` is the example in this repo: branch on
+  `$ZSH_VERSION` and source the shell's own variant.
+- `zsh -n` passing proves nothing about behaviour. Test in a real shell.
+
+Bash-only features go in `bash-interactive.sh`, guarded behind
+`[ "${BASH_VERSINFO[0]}" -ge 4 ]` where they need bash 4+. zsh-only features
+go in `zsh-interactive.zsh`. `bin/` scripts use `#!/usr/bin/env bash` and must
+still run on bash 3.2.
+
+**PATH belongs in `.zprofile`, never `.zshenv`.** On macOS `/etc/zprofile`
+runs `path_helper` after `.zshenv` and puts system directories first.
+
+**The repo lives at `~/.dotfiles`.** The rc files find it there. `install.sh`
+refuses to run from anywhere else, because the failure is otherwise silent.
 
 **Both platforms, every time.** `uname -s` gives `darwin` or `linux`; the
 result is in `$OS` after sourcing `lib/common.sh` and `$_DOTFILES_OS` in shell
@@ -54,9 +75,10 @@ config. Never hardcode a path that exists on only one platform — Homebrew is
 **Login vs interactive is the organising principle.** Anything inherited by
 child processes (`PATH`, exported vars) goes in `shell/env.sh`. Anything that
 is per-shell state (aliases, functions, prompt, completion, `shopt`) goes in
-`shell/interactive.sh`, `aliases.sh` or `functions.sh`. Putting an alias in
-`env.sh` silently does nothing useful; putting a slow lookup in
-`interactive.sh` costs time on every new tab.
+`aliases.sh` or `functions.sh` (shared), or `bash-interactive.sh` /
+`zsh-interactive.zsh` (shell-specific). Putting an alias in `env.sh` silently
+does nothing useful; putting a slow lookup in an interactive file costs time
+on every new tab.
 
 **Keep `shell/env.sh` quiet and fast.** It runs on every login. No output to
 stdout — it corrupts `scp` and `rsync`. Nothing slow without a guard.
@@ -70,15 +92,20 @@ tone and density; match them.
 ## Testing a change
 
 ```bash
-bash -n <file>              # syntax check every shell file you touch
-./install.sh --dry-run      # confirm the plan
-dot validate                # read-only, exits 2 on error
-bash -lc 'echo ok'          # login shell still works
-bash -c  'echo ok'          # non-interactive still silent
+bash -n <file>; zsh -n <file>   # syntax, in both shells for shared files
+./install.sh --dry-run          # confirm the plan
+dot validate                    # read-only, exits 2 on error
+bash -lic 'type ll'             # bash login shell loads everything
+zsh  -lic 'type ll'             # zsh login shell loads everything
+bash -c 'echo ok'; zsh -c 'echo ok'   # scripts stay silent
 ```
 
-The last two matter: a stray `echo` or a syntax error in a sourced file will
-pass `bash -n` and still break real sessions.
+Syntax checks are not enough: a sourced file can parse and still load nothing
+or print to stdout. To test without touching the real `$HOME`, install into a
+scratch directory with a `.dotfiles` symlink back to the repo, then start a
+shell with `env -i HOME=<scratch> ... zsh -l -i -c '...'`. `zsh -o
+sourcetrace` prints every file zsh reads, which is the fastest way to find out
+why something did not load.
 
 ## Adding a file
 

@@ -31,6 +31,14 @@ printf '%s\n' "${C_BLU}dotfiles${C_RESET}  $(_tilde "$DOTFILES")  [$OS/$ARCH]"
 [ "$DRY_RUN" = "1" ] && printf '%s\n' "${C_YEL}dry run -- nothing will be created, moved, or removed${C_RESET}"
 echo
 
+# ------------------------------------------------------------- location --
+# The shell rc files find the repo at $HOME/.dotfiles. Linked from anywhere
+# else, every link lands correctly and then nothing loads, with no error.
+if [ "$(cd "$DOTFILES" && pwd -P)" != "$(cd "$HOME/.dotfiles" 2>/dev/null && pwd -P)" ]; then
+  die "the repo must live at ~/.dotfiles (it is at $(_tilde "$DOTFILES")).
+      The shell config looks for it there. Move it, or: ln -s \"$DOTFILES\" ~/.dotfiles"
+fi
+
 # ---------------------------------------------------------- prerequisites --
 step "Checking prerequisites"
 have git || die "git is required but not installed"

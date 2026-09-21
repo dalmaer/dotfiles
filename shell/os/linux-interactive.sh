@@ -18,11 +18,12 @@ fi
 
 command -v systemctl >/dev/null 2>&1 && alias sc='systemctl' && alias scu='systemctl --user'
 
+_gc_sh=bash; [ -n "${ZSH_VERSION:-}" ] && _gc_sh=zsh
 for _gc in \
-  "$HOME/google-cloud-sdk/completion.bash.inc" \
-  /usr/share/google-cloud-sdk/completion.bash.inc \
-  /usr/lib/google-cloud-sdk/completion.bash.inc
+  "$HOME/google-cloud-sdk" \
+  /usr/share/google-cloud-sdk \
+  /usr/lib/google-cloud-sdk
 do
-  [ -r "$_gc" ] && { . "$_gc"; break; }
+  [ -r "$_gc/completion.$_gc_sh.inc" ] && { . "$_gc/completion.$_gc_sh.inc"; break; }
 done
-unset _gc
+unset _gc _gc_sh

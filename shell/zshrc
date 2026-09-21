@@ -1,0 +1,26 @@
+# ~/.zshrc -- read by INTERACTIVE zsh shells, login or not.
+#
+# zsh only reads this file for interactive shells, so it needs no guard
+# against scripts the way ~/.bashrc does.
+#
+# Managed by ~/.dotfiles -- edit there, not here.
+
+export DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
+
+# A non-login interactive zsh (typing `zsh`, some IDE terminals) has not been
+# through .zprofile. The guard makes both paths land in one place.
+if [ -z "${_DOTFILES_ENV_LOADED:-}" ] && [ -r "$DOTFILES/shell/env.sh" ]; then
+  . "$DOTFILES/shell/env.sh"
+fi
+
+for _f in zsh-interactive.zsh aliases.sh functions.sh; do
+  [ -r "$DOTFILES/shell/$_f" ] && . "$DOTFILES/shell/$_f"
+done
+unset _f
+
+[ -r "$DOTFILES/shell/os/${_DOTFILES_OS}-interactive.sh" ] \
+  && . "$DOTFILES/shell/os/${_DOTFILES_OS}-interactive.sh"
+
+# Machine-specific, never committed. Shared with bash, so keep it portable or
+# branch on $ZSH_VERSION.
+[ -r "$HOME/.shell.local" ] && . "$HOME/.shell.local"

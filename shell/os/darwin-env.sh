@@ -18,8 +18,12 @@ if [ -n "${HOMEBREW_PREFIX:-}" ]; then
 fi
 
 # --- Google Cloud SDK ---------------------------------------------------
-[ -r "${HOMEBREW_PREFIX:-/opt/homebrew}/share/google-cloud-sdk/path.bash.inc" ] \
-  && . "${HOMEBREW_PREFIX:-/opt/homebrew}/share/google-cloud-sdk/path.bash.inc"
+# Shell-specific: path.bash.inc finds itself via $BASH_SOURCE, which is empty
+# in zsh, so sourcing it from zsh silently puts the wrong directory on PATH.
+_gc_sh=bash; [ -n "${ZSH_VERSION:-}" ] && _gc_sh=zsh
+_gc="${HOMEBREW_PREFIX:-/opt/homebrew}/share/google-cloud-sdk/path.$_gc_sh.inc"
+[ -r "$_gc" ] && . "$_gc"
+unset _gc _gc_sh
 
 # --- macOS oddities -----------------------------------------------------
 export BASH_SILENCE_DEPRECATION_WARNING=1   # /bin/bash is 3.2 and macOS nags

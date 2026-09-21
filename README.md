@@ -1,7 +1,7 @@
 # dotfiles
 
-Shell, git, ssh and `~/bin` config for macOS and Linux. One repo, one
-`install.sh`, one `dot` command to keep machines in step.
+Shell (bash and zsh), git, ssh and `~/bin` config for macOS and Linux. One
+repo, one `install.sh`, one `dot` command to keep machines in step.
 
 Nothing private lives here. Work hostnames, API keys and per-machine paths go
 in local override files that are never committed — see
@@ -17,6 +17,10 @@ cd ~/.dotfiles
 exec $SHELL -l             # reload
 dot validate               # confirm
 ```
+
+The repo must live at `~/.dotfiles`: the shell rc files look for it there.
+Cloned anywhere else, every link would install correctly and then nothing
+would load, so `install.sh` refuses.
 
 `install.sh` is idempotent and never deletes. Any real file already sitting at
 a target path is moved to `backup/<timestamp>/` inside the repo before the
@@ -39,12 +43,15 @@ bin/                  everything here is linked into ~/bin
   mkscript            scaffold a new ~/bin script
   ports               what is listening, on either OS
 shell/
-  bash_profile        -> ~/.bash_profile   login shells
-  bashrc              -> ~/.bashrc         interactive shells
-  env.sh              exported env + PATH  (login)
-  interactive.sh      shopt, completion, prompt
-  aliases.sh          aliases
-  functions.sh        functions
+  env.sh              exported env + PATH  (login; shared by both shells)
+  aliases.sh          aliases              (shared)
+  functions.sh        functions            (shared)
+  bash_profile        -> ~/.bash_profile   bash login shells
+  bashrc              -> ~/.bashrc         bash interactive shells
+  bash-interactive.sh shopt, completion, prompt for bash
+  zprofile            -> ~/.zprofile       zsh login shells
+  zshrc               -> ~/.zshrc          zsh interactive shells
+  zsh-interactive.zsh setopt, completion, keys, prompt for zsh
   os/
     darwin-env.sh     darwin-interactive.sh
     linux-env.sh      linux-interactive.sh
@@ -55,6 +62,13 @@ config/               starship.toml
 
 ## How the shell files fit together
 
+Both bash and zsh are supported, and both files sets are linked on every
+machine, so whichever shell you start gets the same environment. `env.sh`,
+`aliases.sh`, `functions.sh` and the `os/` files are shared and must run in
+both; each shell has its own entry points and its own `*-interactive` file.
+
+### bash
+
 Bash reads `~/.bash_profile` for **login** shells and `~/.bashrc` for
 **interactive non-login** shells, and it does *not* read `.bashrc` for login
 shells. macOS terminals open login shells; Linux terminals usually open
@@ -64,8 +78,8 @@ non-login ones. That difference is the whole reason for the split.
 login shell                      non-login interactive shell
   .bash_profile                    .bashrc
     └ env.sh                         ├ env.sh (via guard, if not already run)
-    └ .bashrc                        ├ interactive.sh
-        ├ interactive.sh             ├ aliases.sh
+    └ .bashrc                        ├ bash-interactive.sh
+        ├ bash-interactive.sh        ├ aliases.sh
         ├ aliases.sh                 ├ functions.sh
         ├ functions.sh               ├ os/<os>-interactive.sh
         ├ os/<os>-interactive.sh     └ ~/.shell.local
@@ -74,12 +88,35 @@ login shell                      non-login interactive shell
 
 Both paths converge, so a login shell and a plain `bash` behave identically.
 
+### zsh
+
+zsh reads `~/.zprofile` for login shells and then `~/.zshrc` for every
+interactive shell, login or not, so no hand-off is needed.
+
+```
+login shell                      non-login interactive shell
+  .zprofile                        .zshrc
+    └ env.sh                         ├ env.sh (via guard, if not already run)
+  .zshrc                             ├ zsh-interactive.zsh
+    ├ zsh-interactive.zsh            ├ aliases.sh
+    ├ aliases.sh                     ├ functions.sh
+    ├ functions.sh                   ├ os/<os>-interactive.sh
+    ├ os/<os>-interactive.sh         └ ~/.shell.local
+    └ ~/.shell.local
+```
+
+`env.sh` is loaded from `.zprofile`, not `.zshenv`, on purpose. On macOS,
+`/etc/zprofile` runs `path_helper` *after* `.zshenv` and rebuilds `PATH` with
+the system directories first, so anything prepended in `.zshenv` ends up
+behind `/usr/bin`. `dot validate` warns if `~/.zshenv` sets `PATH`.
+
 The dividing line for **where to put something** is inheritance:
 
 | Kind of thing | Inherited by children? | Goes in |
 |---|---|---|
 | `PATH`, exported vars | yes | `shell/env.sh` |
-| Aliases, functions, prompt, completion, `shopt` | no | `shell/interactive.sh`, `aliases.sh`, `functions.sh` |
+| Aliases, functions | no | `shell/aliases.sh`, `functions.sh` (shared) |
+| Prompt, completion, shell options | no | `shell/bash-interactive.sh` or `zsh-interactive.zsh` |
 
 `env.sh` sets `_DOTFILES_ENV_LOADED` so it is a no-op the second time, which
 is what lets both entry points source it safely.
@@ -91,7 +128,7 @@ creates the first four as documented stubs; you fill them in per machine.
 
 | File | Loaded by | Wins because | Put here |
 |---|---|---|---|
-| `~/.shell.local` | `.bashrc`, last | sourced last | Work aliases and functions, internal hostnames, per-machine experiments |
+| `~/.shell.local` | `.bashrc` / `.zshrc`, last | sourced last | Work aliases and functions, internal hostnames, per-machine experiments. Read by both shells, so keep it portable or branch on `$ZSH_VERSION` |
 | `~/.env.local` | `env.sh`, before `export PATH` | later assignment | Exported vars and `PATH` entries specific to this machine |
 | `~/.gitconfig.local` | `[include]` at end of `.gitconfig` | git takes the **last** value | A different `user.email`, `insteadOf` URL rewrites, proxies |
 | `~/.ssh/config.local` | `Include` at top of `.ssh/config` | ssh takes the **first** value | Internal hosts, jump boxes, `ForwardAgent` |
