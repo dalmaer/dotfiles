@@ -35,7 +35,10 @@ info() { printf '%s\n' "  $*"; }
 step() { printf '%s\n' "${C_BLU}==>${C_RESET} $*"; }
 ok()   { printf '%s\n' "  ${C_GRN}ok${C_RESET}   $*"; }
 skip() { printf '%s\n' "  ${C_DIM}skip${C_RESET} $*"; }
-warn() { printf '%s\n' "  ${C_YEL}warn${C_RESET} $*" >&2; }
+# Warnings go to stdout, not stderr: they are part of the report (which files
+# get backed up), and a dry run is often copied or piped somewhere. On stderr
+# they vanished from exactly the output people paste. die() stays on stderr.
+warn() { printf '%s\n' "  ${C_YEL}warn${C_RESET} $*"; }
 die()  { printf '%s\n' "${C_RED}error${C_RESET} $*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
