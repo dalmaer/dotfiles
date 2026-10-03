@@ -4,7 +4,7 @@
 #   dot validate    read-only health check; changes nothing
 #   dot sync        pull, commit local changes, push
 #   dot status      repo status and link summary
-#   dot link        (re)create symlinks        [--dry-run]
+#   dot link        (re)create symlinks, install LaunchAgents  [--dry-run]
 #   dot pull        pull and relink            [--dry-run]
 #   dot push        commit and push
 #   dot edit        open the repo in $EDITOR
@@ -47,6 +47,10 @@ cmd_link() {
     link "$src" "$dst"
   done < <(manifest)
   [ "$DRY_RUN" = "1" ] || chmod +x "$DOTFILES"/bin/* 2>/dev/null || true
+  if [ "$OS" = "darwin" ]; then
+    step "LaunchAgents"
+    install_agents
+  fi
 }
 
 # ---------------------------------------------------------------- validate --
@@ -106,6 +110,30 @@ cmd_validate() {
       case "$sl" in ''|\#*) continue ;; esac
       _note "$sl"
     done < "$SKIP_FILE"
+  fi
+
+  if [ "$OS" = "darwin" ]; then
+    step "LaunchAgents"
+    local plist rel label installed any=0
+    for plist in "$DOTFILES"/launchd/*.plist; do
+      [ -f "$plist" ] || continue
+      any=1
+      rel="launchd/$(basename "$plist")"
+      label="$(agent_label "$rel")"
+      installed="$LAUNCH_AGENTS/$label.plist"
+      if should_skip "$rel"; then
+        _note "$label (listed in ~/.dotfiles.skip)"
+      elif [ ! -f "$installed" ]; then
+        _warn "$label is not installed -- run 'dot link'"
+      elif [ "$(render_agent "$rel")" != "$(cat "$installed")" ]; then
+        _warn "$(_tilde "$installed") differs from $rel -- run 'dot link' to update it"
+      elif ! launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+        _warn "$label is installed but not loaded -- run 'dot link'"
+      else
+        _ok "$label (installed, loaded)"
+      fi
+    done
+    [ "$any" = "1" ] || _ok "none in launchd/"
   fi
 
   step "Broken links in \$HOME and ~/bin"

@@ -134,3 +134,67 @@ ensure_local() {
     ok "created $(_tilde "$dst")"
   fi
 }
+
+# --- LaunchAgents (macOS) ------------------------------------------------
+# launchd/*.plist are templates: __HOME__ becomes this machine's $HOME and the
+# result is COPIED to ~/Library/LaunchAgents. Not linked -- launchd expands
+# neither ~ nor $HOME, so the installed file must carry real paths, and a
+# symlink would point at a file that still says __HOME__.
+LAUNCH_AGENTS="${LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
+
+# render_agent <repo-relative-template> -- the plist as this machine needs it.
+render_agent() { sed "s|__HOME__|$HOME|g" "$DOTFILES/$1"; }
+
+# agent_label <repo-relative-template>
+agent_label() { basename "$1" .plist; }
+
+# install_agent <repo-relative-template>
+# Idempotent. Backs up a different installed copy, then (re)loads the job.
+install_agent() {
+  local src="$1" label dst uid
+  label="$(agent_label "$src")"
+  dst="$LAUNCH_AGENTS/$label.plist"
+  uid="$(id -u)"
+
+  if [ -f "$dst" ] && [ "$(render_agent "$src")" = "$(cat "$dst")" ]; then
+    skip "$(_tilde "$dst")"
+    launchctl print "gui/$uid/$label" >/dev/null 2>&1 \
+      || run launchctl bootstrap "gui/$uid" "$dst"
+    return 0
+  fi
+
+  if [ -e "$dst" ] || [ -L "$dst" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      warn "existing $(_tilde "$dst") would be backed up to $(_tilde "$BACKUP_DIR")/"
+    else
+      local rel="${dst#$HOME/}"
+      mkdir -p "$BACKUP_DIR/$(dirname "$rel")"
+      cp -p "$dst" "$BACKUP_DIR/$rel"
+      warn "backed up $(_tilde "$dst") -> $(_tilde "$BACKUP_DIR")/$rel"
+      REPLACED="${REPLACED}${BACKUP_DIR}/${rel}"$'\n'
+    fi
+  fi
+
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '  %swould%s install %s from %s and load it\n' "$C_YEL" "$C_RESET" "$(_tilde "$dst")" "$src"
+    return 0
+  fi
+  mkdir -p "$LAUNCH_AGENTS"
+  # An edited plist only takes effect after bootout + bootstrap.
+  launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+  render_agent "$src" > "$dst"
+  plutil -lint "$dst" >/dev/null || { warn "$(_tilde "$dst") is not a valid plist -- not loaded"; return 1; }
+  launchctl bootstrap "gui/$uid" "$dst" && ok "$(_tilde "$dst") <- $src (loaded)"
+}
+
+# install_agents -- every template not listed in ~/.dotfiles.skip. macOS only.
+install_agents() {
+  [ "$OS" = "darwin" ] || return 0
+  local f rel
+  for f in "$DOTFILES"/launchd/*.plist; do
+    [ -f "$f" ] || continue
+    rel="launchd/$(basename "$f")"
+    if should_skip "$rel"; then skip "$rel (listed in ~/.dotfiles.skip)"; continue; fi
+    install_agent "$rel"
+  done
+}

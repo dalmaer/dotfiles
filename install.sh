@@ -93,6 +93,11 @@ for f in "$DOTFILES"/bin/*; do
   link "bin/$(basename "$f")" "$HOME/bin/$(basename "$f")"
 done
 
+if [ "$OS" = "darwin" ]; then
+  step "LaunchAgents (launchd/ -> ~/Library/LaunchAgents)"
+  install_agents
+fi
+
 # --------------------------------------------------- local override stubs --
 # These are the files that never get committed. Each is created once, with a
 # header explaining what belongs in it, and is never touched again.

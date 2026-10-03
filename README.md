@@ -42,6 +42,8 @@ bin/                  everything here is linked into ~/bin
   dot                 the CLI
   mkscript            scaffold a new ~/bin script
   ports               what is listening, on either OS
+  nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
+launchd/              LaunchAgent templates, installed on macOS (see below)
 shell/
   env.sh              exported env + PATH  (login; shared by both shells)
   aliases.sh          aliases              (shared)
@@ -169,7 +171,7 @@ and refuses to commit if it finds one.
 | `dot validate` | Read-only health check. Changes nothing. Exit 0 clean, 1 warnings, 2 errors |
 | `dot sync` | Pull, commit local changes, push, relink |
 | `dot status` | Repo status |
-| `dot link [--dry-run]` | Recreate symlinks |
+| `dot link [--dry-run]` | Recreate symlinks, and on macOS install and load the LaunchAgents |
 | `dot pull` / `dot push` | Halves of sync |
 | `dot edit` | Open the repo in `$EDITOR` |
 | `dot backups` | List `install.sh` backups and what is in them |
@@ -180,6 +182,31 @@ Typical loop: change something, `dot sync` here, `dot sync` on the other box.
 `dot validate` is safe to run anywhere at any time — it only reads. It is the
 right first move on a machine you have not touched in a while.
 
+## Scheduled jobs (macOS)
+
+`launchd/*.plist` are LaunchAgent templates. On macOS, `install.sh` and
+`dot link` turn each into a real plist in `~/Library/LaunchAgents` and load
+it, so a new Mac gets the same scheduled jobs as this one. launchd rather than
+cron: a job due while the Mac sleeps runs on wake, where cron skips it.
+
+| Agent | Runs | When | Log |
+|---|---|---|---|
+| `com.dion.nightly-update` | `~/bin/nightly-update.sh`: `brew update`, `upgrade --formula`, `upgrade --cask`, `cleanup` | 03:00 daily | `~/Library/Logs/nightly-update.log` |
+
+The plists are **copied, not linked**, unlike everything else here: launchd
+expands neither `~` nor `$HOME`, so each template says `__HOME__` and the
+installed copy carries this machine's real path. Edit the template, then
+`dot link`, which backs up the old copy, reloads the job (`bootout` +
+`bootstrap`), and leaves an unchanged one alone. `dot validate` reports any
+agent that is missing, out of date, or not loaded. To keep one off a machine,
+list it in `~/.dotfiles.skip` (e.g. `launchd/com.dion.nightly-update.plist`).
+
+Editing a script an agent runs needs no reload. To run one now:
+
+```bash
+launchctl kickstart gui/$(id -u)/com.dion.nightly-update
+```
+
 ## Adding things
 
 **A new dotfile.** Put it in the repo under the relevant directory, add a line
@@ -189,6 +216,10 @@ to `dotfiles.conf`, run `dot link --dry-run`, then `dot link`.
 `bin/`, links it into `~/bin`, and opens it. Or drop a file in `bin/` and run
 `dot link` — everything in `bin/` is linked automatically, no manifest entry
 needed.
+
+**A scheduled job (macOS).** Put the script in `bin/`, add
+`launchd/<label>.plist` using `__HOME__` for the home directory, check it with
+`plutil -lint`, then `dot link --dry-run` and `dot link`.
 
 **Something OS-specific.** Add it to `shell/os/darwin-*.sh` or
 `shell/os/linux-*.sh`, choosing `-env` or `-interactive` by the inheritance
