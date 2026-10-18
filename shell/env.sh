@@ -65,7 +65,6 @@ path_prepend "$HOME/.npm-global/bin"   # npm i -g without sudo (npm prefix)
 path_prepend "$HOME/.jbang/bin"
 
 # --- Editor CLIs (each only where that editor is installed) -------------
-path_prepend "$HOME/.codeium/windsurf/bin"
 path_prepend "$HOME/.antigravity/antigravity/bin"
 
 # --- Our own scripts win over everything --------------------------------
