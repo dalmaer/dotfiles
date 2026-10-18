@@ -42,6 +42,7 @@ bin/                  everything here is linked into ~/bin
   dot                 the CLI
   mkscript            scaffold a new ~/bin script
   ports               what is listening, on either OS
+  documents-cleaner   gather screenshots from every Mac, de-duplicate, name by app
   nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
 launchd/              LaunchAgent templates, installed on macOS (see below)
 shell/

@@ -49,3 +49,4 @@ fi
 # --- Version managers ---------------------------------------------------
 # fnm installs a directory-change hook, which is per-shell state.
 command -v fnm >/dev/null 2>&1 && eval "$(fnm env --use-on-cd --shell bash)"
+command -v rbenv >/dev/null 2>&1 && eval "$(rbenv init - bash)"

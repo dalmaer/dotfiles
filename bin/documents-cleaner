@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""documents-cleaner: gather, de-duplicate and name screenshots across Macs.
+
+One file, Python 3.9+ standard library only, so it runs on any Mac from your
+dotfiles. Everything that changes files is a dry run unless you pass --apply,
+and every applied change is logged so `undo` can put it back.
+
+  documents-cleaner pack   [--src DIR] [--out ZIP]
+        On any Mac: zip DIR (default ~/Documents/Screenshots) with a manifest
+        of each file's SHA-256, size and dates. Copy the zip to the main Mac
+        (AirDrop, iCloud Drive, a USB stick...).
+
+  documents-cleaner import ZIP... [--dir DIR] [--apply]
+        On the main Mac: verify each file against the manifest, skip any whose
+        bytes are already in DIR, and copy the rest in with their original
+        dates. Collisions get " 2", " 3"... names; nothing is overwritten.
+
+  documents-cleaner dedupe [--dir DIR] [--apply]
+        Byte-identical files in DIR: keep one (a name you gave it beats a
+        "Screenshot ..." name; then the oldest) and move the rest to the Trash.
+
+  documents-cleaner rename [--dir DIR] [--namer ollama[:MODEL]|claude] [--limit N] [--apply]
+        Rename "Screenshot ...", "Screen Shot ...", "CleanShot ...",
+        "Screen Recording ..." files to <app>-<YYYY-MM-DD>[-N].<ext>, e.g.
+        stitch-2026-10-03.png, by asking a vision model what app is on screen.
+        ollama (default, local and free; MODEL defaults to qwen2.5vl:7b, or set
+        DOCUMENTS_CLEANER_MODEL) or claude (the Claude Code CLI). Files the
+        model can't name keep their names.
+
+  documents-cleaner undo   [--dir DIR] [--apply]
+        Reverse the last applied run (renames and imports; trashed duplicates
+        are moved back from the Trash folder they went to).
+
+  documents-cleaner status [--dir DIR]
+"""
+
+import argparse
+import base64
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+import uuid
+import zipfile
+
+HOME = os.path.expanduser("~")
+DEFAULT_DIR = os.path.join(HOME, "Documents", "Screenshots")
+STATE = ".documents-cleaner"
+MANIFEST = "documents-cleaner-manifest.json"
+SKIP = {".DS_Store", ".localized", "Icon\r"}
+GENERIC = re.compile(
+    r"^(?:Screenshot|Screen Shot|Screen Recording|CleanShot|Simulator Screen Shot|Simulator Screen Recording)[ _-]",
+    re.I,
+)
+# "Screenshot 2024-05-01 at 10.22.33 AM", "CleanShot 2024-05-01 at 10.22.33@2x"
+STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})(?: at (\d{1,2})\.(\d{2})\.(\d{2})(?:\s?([AP]M))?)?", re.I)
+IMAGE = {".png", ".jpg", ".jpeg", ".heic", ".gif", ".tiff", ".webp"}
+VIDEO = {".mov", ".mp4", ".m4v"}
+
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def files_in(d):
+    out = []
+    for name in sorted(os.listdir(d)):
+        p = os.path.join(d, name)
+        if name in SKIP or name.startswith(".") or not os.path.isfile(p) or os.path.islink(p):
+            continue
+        out.append(p)
+    return out
+
+
+def birth(path):
+    st = os.stat(path)
+    return getattr(st, "st_birthtime", st.st_mtime)
+
+
+def captured(path):
+    """When it was taken: the filename's stamp, else the file's birth time."""
+    m = STAMP.search(os.path.basename(path))
+    if m:
+        y, mo, d, h, mi, s, ampm = m.groups()
+        h = int(h or 0)
+        if ampm:
+            h = h % 12 + (12 if ampm.upper() == "PM" else 0)
+        try:
+            return dt.datetime(int(y), int(mo), int(d), h, int(mi or 0), int(s or 0))
+        except ValueError:
+            pass
+    return dt.datetime.fromtimestamp(birth(path))
+
+
+def free_name(d, name, taken=()):
+    """`name` in `d`, or "stem 2.ext", "stem 3.ext"... if taken."""
+    stem, ext = os.path.splitext(name)
+    candidate, n = name, 1
+    while os.path.exists(os.path.join(d, candidate)) or candidate in taken:
+        n += 1
+        candidate = "%s %d%s" % (stem, n, ext)
+    return candidate
+
+
+def slug(text):
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return s[:40].strip("-")
+
+
+class Index:
+    """SHA-256 of every file in a folder, cached by (size, mtime)."""
+
+    def __init__(self, d):
+        self.dir = d
+        self.path = os.path.join(d, STATE, "index.json")
+        try:
+            with open(self.path) as f:
+                self.cache = json.load(f)
+        except (OSError, ValueError):
+            self.cache = {}
+
+    def scan(self):
+        by_hash, fresh = {}, {}
+        for p in files_in(self.dir):
+            st = os.stat(p)
+            key = os.path.basename(p)
+            hit = self.cache.get(key)
+            digest = hit[2] if hit and hit[0] == st.st_size and hit[1] == st.st_mtime else sha256(p)
+            fresh[key] = [st.st_size, st.st_mtime, digest]
+            by_hash.setdefault(digest, []).append(p)
+        self.cache = fresh
+        return by_hash
+
+    def save(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with open(self.path, "w") as f:
+            json.dump(self.cache, f)
+
+
+class Log:
+    """Applied changes, one JSON line each, grouped by run id (for undo)."""
+
+    def __init__(self, d):
+        self.path = os.path.join(d, STATE, "log.jsonl")
+        self.run = dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+
+    def write(self, **entry):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        entry.update(run=self.run, at=dt.datetime.now().isoformat(timespec="seconds"))
+        with open(self.path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def entries(self):
+        try:
+            with open(self.path) as f:
+                return [json.loads(line) for line in f if line.strip()]
+        except OSError:
+            return []
+
+
+def say(apply, text):
+    print(("" if apply else "[dry run] ") + text)
+
+
+def trash_dir():
+    # macOS's Trash, or the freedesktop one on Linux.
+    root = os.path.join(HOME, ".Trash") if sys.platform == "darwin" else os.path.join(
+        HOME, ".local", "share", "Trash", "files")
+    d = os.path.join(root, "documents-cleaner-" + dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# ── pack ───────────────────────────────────────────────────────────────────
+
+
+def cmd_pack(a):
+    src = os.path.abspath(os.path.expanduser(a.src))
+    host = socket.gethostname().split(".")[0]
+    out = os.path.expanduser(a.out or os.path.join(
+        HOME, "Desktop", "screenshots-%s-%s.zip" % (slug(host) or "mac", dt.datetime.now().strftime("%Y%m%d-%H%M"))))
+    entries = []
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+        for p in files_in(src):
+            st = os.stat(p)
+            name = os.path.basename(p)
+            entries.append({"name": name, "sha256": sha256(p), "size": st.st_size,
+                            "mtime": st.st_mtime, "birthtime": birth(p)})
+            z.write(p, "files/" + name)
+        z.writestr(MANIFEST, json.dumps({"host": host, "source": src, "packed": dt.datetime.now().isoformat(
+            timespec="seconds"), "files": entries}, indent=1))
+    size = os.path.getsize(out) / 1e6
+    print("packed %d files from %s → %s (%.0f MB)" % (len(entries), src, out, size))
+    print("copy it to the main Mac, then: documents-cleaner import %s" % os.path.basename(out))
+
+
+# ── import ─────────────────────────────────────────────────────────────────
+
+
+def cmd_import(a):
+    d = os.path.abspath(os.path.expanduser(a.dir))
+    os.makedirs(d, exist_ok=True)
+    index = Index(d)
+    have = index.scan()
+    log = Log(d)
+    added = dup = bad = 0
+    taken = set()
+    for zpath in a.zips:
+        with zipfile.ZipFile(os.path.expanduser(zpath)) as z:
+            manifest = json.loads(z.read(MANIFEST))
+            host = manifest.get("host", "?")
+            for e in manifest["files"]:
+                # The zip came from another machine: names are basenames only.
+                name = os.path.basename(e["name"])
+                if not name or name in SKIP:
+                    continue
+                if e["sha256"] in have:
+                    dup += 1
+                    continue
+                with z.open("files/" + e["name"]) as src, tempfile.NamedTemporaryFile(dir=d, delete=False) as tmp:
+                    h = hashlib.sha256()
+                    for block in iter(lambda: src.read(1 << 20), b""):
+                        h.update(block)
+                        tmp.write(block)
+                if h.hexdigest() != e["sha256"]:
+                    os.unlink(tmp.name)
+                    bad += 1
+                    print("! %s from %s: bytes don't match the manifest, skipped" % (name, host))
+                    continue
+                target = free_name(d, name, taken)
+                taken.add(target)
+                have[e["sha256"]] = [os.path.join(d, target)]
+                added += 1
+                say(a.apply, "add  %s  (from %s)" % (target, host))
+                if a.apply:
+                    final = os.path.join(d, target)
+                    os.replace(tmp.name, final)
+                    os.utime(final, (e["mtime"], e["mtime"]))
+                    log.write(op="import", to=target, sha256=e["sha256"], host=host)
+                else:
+                    os.unlink(tmp.name)
+    print("%d new, %d already here (same bytes), %d failed checks" % (added, dup, bad))
+    if a.apply:
+        index.scan()
+        index.save()
+    elif added:
+        print("run again with --apply to copy them in")
+
+
+# ── dedupe ─────────────────────────────────────────────────────────────────
+
+
+def keeper_rank(p):
+    # A name you chose beats a generic one, a plain name beats "… copy" / "… 2";
+    # then the oldest.
+    name = os.path.basename(p)
+    suffixed = re.search(r"(?: copy(?: \d+)?| \d+)\.[^.]+$", name) is not None
+    return (1 if GENERIC.match(name) else 0, 1 if suffixed else 0, birth(p), name)
+
+
+def cmd_dedupe(a):
+    d = os.path.abspath(os.path.expanduser(a.dir))
+    index = Index(d)
+    groups = [sorted(ps, key=keeper_rank) for ps in index.scan().values() if len(ps) > 1]
+    log = Log(d)
+    trash = None
+    extra = freed = 0
+    for ps in groups:
+        keep, rest = ps[0], ps[1:]
+        for p in rest:
+            extra += 1
+            freed += os.path.getsize(p)
+            say(a.apply, "trash %s  (same bytes as %s)" % (os.path.basename(p), os.path.basename(keep)))
+            if a.apply:
+                trash = trash or trash_dir()
+                dest = os.path.join(trash, free_name(trash, os.path.basename(p)))
+                shutil.move(p, dest)
+                log.write(op="trash", frm=os.path.basename(p), to=dest)
+    print("%d duplicate copies in %d groups (%.1f MB)" % (extra, len(groups), freed / 1e6))
+    if a.apply:
+        index.scan()
+        index.save()
+        if trash:
+            print("moved to %s" % trash)
+    elif extra:
+        print("run again with --apply to move them to the Trash")
+
+
+# ── rename ─────────────────────────────────────────────────────────────────
+
+PROMPT = (
+    "This is a screenshot or screen recording from a Mac. Which app or website is "
+    "it mainly showing? Answer with the product name only, one to three words, "
+    "e.g. Stitch, Gmail, Figma, United, Google Docs, Terminal. If you can't tell, "
+    "answer unknown."
+)
+
+
+class NamerError(Exception):
+    """The namer itself failed (not signed in, no model): stop, don't skip."""
+
+
+def thumbnail(path, out_dir):
+    """A ≤1024px PNG of an image or a video's first frame (Quick Look). Without
+    Quick Look (Linux), images go as they are and videos can't be named."""
+    if not shutil.which("qlmanage"):
+        return path if os.path.splitext(path)[1].lower() in IMAGE else None
+    subprocess.run(["qlmanage", "-t", "-s", "1024", "-o", out_dir, path],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    png = os.path.join(out_dir, os.path.basename(path) + ".png")
+    return png if os.path.exists(png) else None
+
+
+def clean_answer(text):
+    text = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    text = re.sub(r"^(the )?(app|website|product)( is|:)?\s*", "", text, flags=re.I).strip(" .\"'`*")
+    if not text or text.lower() in {"unknown", "unclear", "none", "n/a"} or len(text) > 40:
+        return None
+    return slug(text) or None
+
+
+def name_with_ollama(model):
+    def ask(png):
+        body = json.dumps({"model": model, "prompt": PROMPT, "stream": False,
+                           "images": [base64.b64encode(open(png, "rb").read()).decode()],
+                           "options": {"temperature": 0}}).encode()
+        req = urllib.request.Request("http://127.0.0.1:11434/api/generate", body,
+                                     {"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                return clean_answer(json.load(r).get("response"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:200]
+            hint = " (try: ollama pull %s)" % model if e.code == 404 else ""
+            raise NamerError("ollama: HTTP %d %s%s" % (e.code, detail, hint))
+        except urllib.error.URLError as e:
+            raise NamerError("ollama isn't answering on 127.0.0.1:11434 (%s); is it running?" % e.reason)
+    return ask
+
+
+def name_with_claude():
+    def ask(png):
+        r = subprocess.run(["claude", "-p", "%s\n\nThe image is %s" % (PROMPT, png),
+                            "--allowedTools", "Read", "--output-format", "text"],
+                           capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            why = [l for l in (r.stdout + "\n" + r.stderr).splitlines() if l.strip() and "stdin" not in l]
+            raise NamerError("claude: %s" % (why[-1][:200] if why else "exit %d" % r.returncode))
+        return clean_answer(r.stdout)
+    return ask
+
+
+def cmd_rename(a):
+    d = os.path.abspath(os.path.expanduser(a.dir))
+    kind, _, model = a.namer.partition(":")
+    if kind == "ollama":
+        ask = name_with_ollama(model or os.environ.get("DOCUMENTS_CLEANER_MODEL", "qwen2.5vl:7b"))
+    elif kind == "claude":
+        ask = name_with_claude()
+    else:
+        sys.exit("unknown --namer %s (ollama[:MODEL] or claude)" % a.namer)
+    todo = [p for p in files_in(d)
+            if GENERIC.match(os.path.basename(p)) and os.path.splitext(p)[1].lower() in IMAGE | VIDEO]
+    todo.sort(key=captured)
+    if a.limit:
+        todo = todo[: a.limit]
+    log = Log(d)
+    taken = set()
+    named = kept = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, p in enumerate(todo, 1):
+            png = thumbnail(p, tmp)
+            try:
+                app = ask(png) if png else None
+            except NamerError as e:
+                sys.exit("stopped: %s\n%d named before this; nothing else changed" % (e, named))
+            except Exception as e:  # one odd answer names nothing; it doesn't stop the run
+                print("! %s: %s" % (os.path.basename(p), e))
+                app = None
+            if not app:
+                kept += 1
+                print("[%d/%d] keep %s  (couldn't tell the app)" % (i, len(todo), os.path.basename(p)))
+                continue
+            ext = os.path.splitext(p)[1].lower()
+            base = "%s-%s" % (app, captured(p).strftime("%Y-%m-%d"))
+            target, n = base + ext, 1
+            while os.path.exists(os.path.join(d, target)) or target in taken:
+                n += 1
+                target = "%s-%d%s" % (base, n, ext)
+            taken.add(target)
+            named += 1
+            say(a.apply, "[%d/%d] %s → %s" % (i, len(todo), os.path.basename(p), target))
+            if a.apply:
+                os.rename(p, os.path.join(d, target))
+                log.write(op="rename", frm=os.path.basename(p), to=target)
+    print("%d named, %d kept their names" % (named, kept))
+    if not a.apply and named:
+        print("run again with --apply to rename them")
+
+
+# ── undo / status ──────────────────────────────────────────────────────────
+
+
+def cmd_undo(a):
+    d = os.path.abspath(os.path.expanduser(a.dir))
+    log = Log(d)
+    entries = log.entries()
+    runs = [e["run"] for e in entries if not e.get("undone")]
+    if not runs:
+        print("nothing to undo")
+        return
+    last = runs[-1]
+    for e in reversed([e for e in entries if e["run"] == last]):
+        if e["op"] == "rename":
+            src, dst = os.path.join(d, e["to"]), os.path.join(d, e["frm"])
+        elif e["op"] == "trash":
+            src, dst = e["to"], os.path.join(d, e["frm"])
+        elif e["op"] == "import":
+            src, dst = os.path.join(d, e["to"]), None
+        else:
+            continue
+        if not os.path.exists(src):
+            print("! %s is gone; skipped" % src)
+            continue
+        if dst is None:
+            say(a.apply, "trash imported %s" % e["to"])
+            if a.apply:
+                t = trash_dir()
+                shutil.move(src, os.path.join(t, os.path.basename(src)))
+        else:
+            if os.path.exists(dst):
+                print("! %s already exists; skipped" % dst)
+                continue
+            say(a.apply, "%s → %s" % (os.path.basename(src), os.path.basename(dst)))
+            if a.apply:
+                shutil.move(src, dst)
+    if a.apply:
+        log.write(op="undo", undid=last, undone=True)
+        # Mark the run undone so the next undo goes one further back.
+        with open(log.path) as f:
+            lines = [json.loads(l) for l in f if l.strip()]
+        with open(log.path, "w") as f:
+            for e in lines:
+                if e.get("run") == last:
+                    e["undone"] = True
+                f.write(json.dumps(e) + "\n")
+
+
+def cmd_status(a):
+    d = os.path.abspath(os.path.expanduser(a.dir))
+    ps = files_in(d)
+    generic = [p for p in ps if GENERIC.match(os.path.basename(p))]
+    index = Index(d)
+    groups = [g for g in index.scan().values() if len(g) > 1]
+    index.save()
+    print("%s: %d files, %d with a generic name, %d duplicate copies" % (
+        d, len(ps), len(generic), sum(len(g) - 1 for g in groups)))
+
+
+def main():
+    p = argparse.ArgumentParser(prog="documents-cleaner", description=__doc__.split("\n\n")[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("pack")
+    s.add_argument("--src", default=DEFAULT_DIR)
+    s.add_argument("--out")
+    s.set_defaults(fn=cmd_pack)
+    for name, fn in (("import", cmd_import), ("dedupe", cmd_dedupe), ("rename", cmd_rename),
+                     ("undo", cmd_undo), ("status", cmd_status)):
+        s = sub.add_parser(name)
+        s.add_argument("--dir", default=DEFAULT_DIR)
+        if name != "status":
+            s.add_argument("--apply", action="store_true", help="make the changes (default: show them)")
+        if name == "import":
+            s.add_argument("zips", nargs="+")
+        if name == "rename":
+            s.add_argument("--namer", default="ollama")
+            s.add_argument("--limit", type=int, default=0)
+        s.set_defaults(fn=fn)
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

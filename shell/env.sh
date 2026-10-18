@@ -61,6 +61,12 @@ export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
 path_prepend "$BUN_INSTALL/bin"
 path_prepend "$HOME/.cargo/bin"
 path_prepend "$HOME/go/bin"
+path_prepend "$HOME/.npm-global/bin"   # npm i -g without sudo (npm prefix)
+path_prepend "$HOME/.jbang/bin"
+
+# --- Editor CLIs (each only where that editor is installed) -------------
+path_prepend "$HOME/.codeium/windsurf/bin"
+path_prepend "$HOME/.antigravity/antigravity/bin"
 
 # --- Our own scripts win over everything --------------------------------
 path_prepend "$HOME/.local/bin"

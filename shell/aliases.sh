@@ -39,6 +39,15 @@ alias main='git switch main'
 alias pull='git pull'
 alias merges='gh pr list --base main --state merged --limit 5'
 
+# --- Tools --------------------------------------------------------------
+# macOS ships python3 and pip3 only.
+alias python='python3'
+alias pip='pip3'
+alias tm='task-master'
+alias taskmaster='task-master'
+alias 'j!'='jbang'
+alias aic='git add .; aicommits'
+
 # --- Misc ---------------------------------------------------------------
 alias path='printf "%s\n" $PATH | tr ":" "\n"'
 alias reload='exec "$SHELL" -l'

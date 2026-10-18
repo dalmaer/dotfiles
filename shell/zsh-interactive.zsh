@@ -58,3 +58,7 @@ fi
 
 # --- Version managers ---------------------------------------------------
 command -v fnm >/dev/null 2>&1 && eval "$(fnm env --use-on-cd --shell zsh)"
+command -v rbenv >/dev/null 2>&1 && eval "$(rbenv init - zsh)"
+
+# bun's completions are zsh-only.
+[ -s "${BUN_INSTALL:-$HOME/.bun}/_bun" ] && . "${BUN_INSTALL:-$HOME/.bun}/_bun"
