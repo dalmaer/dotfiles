@@ -37,6 +37,7 @@ fails if anything under `backup/` is ever tracked.
 ```
 install.sh            first-run setup; --dry-run to preview
 dotfiles.conf         manifest: repo path -> target path
+Brewfile              Homebrew packages for every machine (extras: ~/Brewfile.local)
 lib/common.sh         shared helpers (os detection, linking, dry-run)
 bin/                  everything here is linked into ~/bin
   dot                 the CLI
@@ -234,3 +235,18 @@ key-shaped strings, so a mistake shows up rather than sitting there quietly.
 
 `~/.npmrc` is excluded deliberately: it holds registry auth tokens. Copy it
 between machines by hand, as with `secrets.env`.
+
+## Homebrew packages
+
+`Brewfile` lists what every machine gets; `~/Brewfile.local` (never committed,
+created as a stub by `install.sh`) lists one machine's extras. `install.sh`
+runs `brew bundle install --no-upgrade` on both, and the nightly job does too,
+so a package added here on one Mac appears on the others after `dot sync` and
+the next 3am run. Neither ever uninstalls anything. Casks sit under `if OS.mac?`
+so the same file works on Linux.
+
+## macOS settings
+
+`install.sh` points screenshots at `~/Documents/Screenshots` on every Mac, the
+folder `documents-cleaner` packs and imports.
+

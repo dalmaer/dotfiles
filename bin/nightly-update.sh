@@ -29,6 +29,12 @@ brew upgrade --formula          # all formulae (gh included); `brew upgrade gh .
 brew upgrade --cask || true     # casks may need a password; logged, not fatal
 brew cleanup --prune=30
 
+# Pick up anything newly added to the shared or local Brewfile. Installs only;
+# never upgrades (done above) or removes.
+for bf in "$HOME/.dotfiles/Brewfile" "$HOME/Brewfile.local"; do
+  [ -r "$bf" ] && brew bundle install --no-upgrade --file="$bf"
+done
+
 # Add other tools here, e.g.:
 # npm update -g
 # rustup update

@@ -162,6 +162,52 @@ ensure_local "$HOME/.ssh/config.local" \
 #   	User myuser
 #   	ForwardAgent yes
 '
+
+ensure_local "$HOME/Brewfile.local" \
+'# ~/Brewfile.local -- this machine'\''s own Homebrew extras. Never committed.
+#
+# install.sh runs `brew bundle` on ~/.dotfiles/Brewfile (every machine), then
+# on this file. To see what this Mac has that neither lists:
+#   brew bundle cleanup --file=<(cat ~/.dotfiles/Brewfile ~/Brewfile.local)
+#
+# Example:
+#   brew "ollama"
+#   cask "docker-desktop"
+'
+fi
+
+# --------------------------------------------------------------- homebrew --
+# Shared packages, then this machine's. `brew bundle` only adds; it never
+# removes, so a package missing from both files is left alone.
+step "Homebrew packages (Brewfile, then ~/Brewfile.local)"
+if have brew; then
+  for bf in "$DOTFILES/Brewfile" "$HOME/Brewfile.local"; do
+    [ -r "$bf" ] || continue
+    if brew bundle check --no-upgrade --file="$bf" >/dev/null 2>&1; then
+      ok "$(_tilde "$bf"): everything installed"
+    else
+      run brew bundle install --no-upgrade --file="$bf" \
+        || warn "$(_tilde "$bf"): some packages failed -- run: brew bundle install --file=$(_tilde "$bf")"
+    fi
+  done
+else
+  skip "Homebrew is not installed (https://brew.sh), so the Brewfiles were not applied"
+fi
+
+# ---------------------------------------------------------- macOS settings --
+if [ "$OS" = "darwin" ]; then
+  step "macOS settings"
+  # Screenshots land in one folder on every Mac, so documents-cleaner's pack
+  # and import always mean the same place.
+  SHOTS="$HOME/Documents/Screenshots"
+  CUR="$(defaults read com.apple.screencapture location 2>/dev/null || true)"
+  if [ "${CUR/#\~/$HOME}" = "$SHOTS" ]; then
+    ok "screenshots save to $(_tilde "$SHOTS")"
+  else
+    run mkdir -p "$SHOTS"
+    run defaults write com.apple.screencapture location "$SHOTS"
+    run killall SystemUIServer
+  fi
 fi
 
 # ---------------------------------------------------------------- secrets --
