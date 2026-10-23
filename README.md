@@ -44,6 +44,7 @@ bin/                  everything here is linked into ~/bin
   mkscript            scaffold a new ~/bin script
   ports               what is listening, on either OS
   documents-cleaner   gather screenshots from every Mac, de-duplicate, name by app
+  benos-autoupdate    install a waiting BenOS update overnight; notify on a new version
   nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
 launchd/              LaunchAgent templates, installed on macOS (see below)
 shell/
@@ -249,4 +250,15 @@ so the same file works on Linux.
 
 `install.sh` points screenshots at `~/Documents/Screenshots` on every Mac, the
 folder `documents-cleaner` packs and imports.
+
+## BenOS updates
+
+`benos-autoupdate` runs at 4:30am (launchd, after the 3am brew run). The BenOS
+app downloads updates itself but installs one only when it is quit; this
+installs a waiting update overnight: it quits the app, stops the engine,
+refreshes one rolling APFS-clone snapshot at `~/benos-snapshot-autoupdate`,
+reopens the app and makes sure the engine is back on the new version. Whenever
+the installed version changes, however it changed, a notification says so.
+`benos-autoupdate --check` reports without installing. It does nothing on a
+machine without BenOS. Log: `~/Library/Logs/benos-autoupdate.log`.
 

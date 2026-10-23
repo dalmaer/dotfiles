@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# benos-autoupdate -- install a downloaded BenOS update overnight, and say so.
+#
+# Run at 4:30am by launchd (launchd/com.dion.benos-autoupdate.plist), after the
+# 3am brew run. The BenOS app downloads updates by itself but only installs one
+# when it is quit, which can be weeks; and when it does, nobody is told. This:
+#
+#   1. asks `benos version --json` what is installed and whether a newer build
+#      is downloaded and waiting (the app's own update feed; never GitHub);
+#   2. if one is waiting: quits the app, stops the engine, refreshes one rolling
+#      APFS-clone snapshot of the library (the release notes' "snapshot first"),
+#      reopens the app (which installs the update) and makes sure the engine is
+#      back on the new version -- after a manual stop, launchd doesn't restart it;
+#   3. notifies whenever the installed version differs from the last one seen,
+#      whether this script installed it or the app did on a quit.
+#
+# Safe to run by hand: `benos-autoupdate` (or `--check` to only report).
+# Does nothing on a machine without BenOS. Log: ~/Library/Logs/benos-autoupdate.log
+
+set -uo pipefail
+
+[ "$(uname -s)" = "Darwin" ] || exit 0
+BENOS="$(command -v benos || true)"
+[ -n "$BENOS" ] || [ -x /usr/local/bin/benos ] && BENOS="${BENOS:-/usr/local/bin/benos}"
+[ -n "$BENOS" ] && [ -x "$BENOS" ] || { echo "benos-autoupdate: no BenOS here, nothing to do"; exit 0; }
+
+DATA_DIR="${BENOS_DATA_DIR:-$HOME/benos}"
+SNAPSHOT="$HOME/benos-snapshot-autoupdate"
+STATE_DIR="$HOME/.local/state/benos-autoupdate"
+LAST="$STATE_DIR/last-version"
+CHECK_ONLY=0
+[ "${1:-}" = "--check" ] && CHECK_ONLY=1
+mkdir -p "$STATE_DIR"
+
+say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+notify() {
+  # Notification Center, attributed to Script Editor when run from launchd.
+  /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true
+}
+
+# `benos version --json` → one field.
+field() {
+  "$BENOS" version --json 2>/dev/null | /usr/bin/python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+path = sys.argv[1].split(".")
+for k in path:
+    r = r.get(k) if isinstance(r, dict) else None
+print("" if r is None else r)' "$1"
+}
+
+engine_up() { "$BENOS" status >/dev/null 2>&1; }
+
+wait_for() { # seconds, command...
+  local n="$1"; shift
+  while [ "$n" -gt 0 ]; do "$@" && return 0; sleep 3; n=$((n - 3)); done
+  return 1
+}
+
+app_running() { pgrep -xq BenOS; }
+
+verdict="$(field verdict)"
+installed="$(field app.version)"
+say "installed ${installed:-?}, verdict ${verdict:-?}"
+
+if [ "$CHECK_ONLY" = "0" ] && { [ "$verdict" = "downloaded" ] || [ "$verdict" = "engine-behind" ]; }; then
+  target="$(field pending.version)"
+  say "installing ${target:-the update} (verdict $verdict)"
+
+  # 1. Quit the app (a downloaded update installs on quit) and stop the engine.
+  /usr/bin/osascript -e 'quit app "BenOS"' >/dev/null 2>&1 || true
+  wait_for 90 sh -c '! pgrep -xq BenOS' || say "warning: the app didn't quit within 90s"
+  "$BENOS" stop >/dev/null 2>&1 || true
+
+  # 2. One rolling snapshot, taken while nothing writes. APFS clone: near
+  #    instant and nearly free until the library diverges from it.
+  if [ "$verdict" = "downloaded" ] && ! engine_up && [ -d "$DATA_DIR" ]; then
+    if [ -d "$SNAPSHOT" ] && [ "$(basename "$SNAPSHOT")" = "benos-snapshot-autoupdate" ]; then
+      rm -rf "$SNAPSHOT"
+    fi
+    if cp -Rc "$DATA_DIR" "$SNAPSHOT"; then say "snapshot: $SNAPSHOT"
+    else say "warning: snapshot failed; continuing"; fi
+  fi
+
+  # 3. Reopen (installs the update), then make sure the engine is back.
+  /usr/bin/open -a BenOS
+  wait_for 120 engine_up || {
+    launchctl kickstart "gui/$(id -u)/org.benos.engine" >/dev/null 2>&1 || true
+    wait_for 120 engine_up
+  }
+  if engine_up; then
+    say "engine is up"
+  else
+    say "error: the engine didn't come back"
+    notify "BenOS update needs you" "The engine didn't restart after updating. Open BenOS to check."
+    exit 1
+  fi
+  installed="$(field app.version)"
+fi
+
+# Tell when the version changed since the last run, however it changed.
+prev="$(cat "$LAST" 2>/dev/null || true)"
+if [ -n "$installed" ] && [ "$installed" != "$prev" ]; then
+  [ -n "$prev" ] && {
+    say "updated: $prev -> $installed"
+    notify "BenOS updated to $installed" "Was $prev. The engine is running the new version."
+  }
+  printf '%s\n' "$installed" > "$LAST"
+fi
+
+latest="$(field feed.release.version)"
+say "done: installed ${installed:-?}, latest on the feed ${latest:-unknown}"
