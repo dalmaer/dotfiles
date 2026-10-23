@@ -7,12 +7,19 @@
 #
 #   1. asks `benos version --json` what is installed and whether a newer build
 #      is downloaded and waiting (the app's own update feed; never GitHub);
-#   2. if one is waiting: quits the app, stops the engine, refreshes one rolling
-#      APFS-clone snapshot of the library (the release notes' "snapshot first"),
+#   2. if one is waiting: quits the app, stops the engine, takes an APFS-clone
+#      snapshot of the library (the release notes' "snapshot first"),
 #      reopens the app (which installs the update) and makes sure the engine is
 #      back on the new version -- after a manual stop, launchd doesn't restart it;
 #   3. notifies whenever the installed version differs from the last one seen,
 #      whether this script installed it or the app did on a quit.
+#
+# Snapshots live in ~/benos-snapshots/<date>-<from>-to-<to>, and every run
+# prunes them: keep the newest KEEP (default 2), and delete any older than DAYS
+# (default 30). A clone costs only the space the library has since changed, so
+# an old one grows; these bound it. Set either in ~/.config/benos-autoupdate.conf
+# (`KEEP=3`, `DAYS=14`; KEEP=0 turns snapshots off). Only folders this script
+# made are ever deleted.
 #
 # Safe to run by hand: `benos-autoupdate` (or `--check` to only report).
 # Does nothing on a machine without BenOS. Log: ~/Library/Logs/benos-autoupdate.log
@@ -25,7 +32,13 @@ BENOS="$(command -v benos || true)"
 [ -n "$BENOS" ] && [ -x "$BENOS" ] || { echo "benos-autoupdate: no BenOS here, nothing to do"; exit 0; }
 
 DATA_DIR="${BENOS_DATA_DIR:-$HOME/benos}"
-SNAPSHOT="$HOME/benos-snapshot-autoupdate"
+SNAPSHOTS="$HOME/benos-snapshots"
+KEEP=2
+DAYS=30
+# shellcheck disable=SC1090
+[ -r "$HOME/.config/benos-autoupdate.conf" ] && . "$HOME/.config/benos-autoupdate.conf"
+case "$KEEP" in ''|*[!0-9]*) KEEP=2 ;; esac
+case "$DAYS" in ''|*[!0-9]*) DAYS=30 ;; esac
 STATE_DIR="$HOME/.local/state/benos-autoupdate"
 LAST="$STATE_DIR/last-version"
 CHECK_ONLY=0
@@ -72,14 +85,16 @@ if [ "$CHECK_ONLY" = "0" ] && { [ "$verdict" = "downloaded" ] || [ "$verdict" = 
   wait_for 90 sh -c '! pgrep -xq BenOS' || say "warning: the app didn't quit within 90s"
   "$BENOS" stop >/dev/null 2>&1 || true
 
-  # 2. One rolling snapshot, taken while nothing writes. APFS clone: near
-  #    instant and nearly free until the library diverges from it.
-  if [ "$verdict" = "downloaded" ] && ! engine_up && [ -d "$DATA_DIR" ]; then
-    if [ -d "$SNAPSHOT" ] && [ "$(basename "$SNAPSHOT")" = "benos-snapshot-autoupdate" ]; then
-      rm -rf "$SNAPSHOT"
+  # 2. A snapshot, taken while nothing writes. APFS clone: near instant and
+  #    nearly free until the library diverges from it. Pruned below.
+  if [ "$KEEP" -gt 0 ] && [ "$verdict" = "downloaded" ] && ! engine_up && [ -d "$DATA_DIR" ]; then
+    snap="$SNAPSHOTS/$(date +%Y%m%d-%H%M)-${installed:-unknown}-to-${target:-next}"
+    mkdir -p "$SNAPSHOTS"
+    if cp -Rc "$DATA_DIR" "$snap" && : > "$snap/.benos-autoupdate-snapshot"; then
+      say "snapshot: $snap"
+    else
+      say "warning: snapshot failed; continuing"
     fi
-    if cp -Rc "$DATA_DIR" "$SNAPSHOT"; then say "snapshot: $SNAPSHOT"
-    else say "warning: snapshot failed; continuing"; fi
   fi
 
   # 3. Reopen (installs the update), then make sure the engine is back.
@@ -106,6 +121,21 @@ if [ -n "$installed" ] && [ "$installed" != "$prev" ]; then
     notify "BenOS updated to $installed" "Was $prev. The engine is running the new version."
   }
   printf '%s\n' "$installed" > "$LAST"
+fi
+
+# Prune snapshots: newest KEEP stay unless older than DAYS. Only folders that
+# carry this script's marker file are candidates, so nothing else is touched.
+if [ -d "$SNAPSHOTS" ]; then
+  n=0
+  for snap in $(ls -1d "$SNAPSHOTS"/*/ 2>/dev/null | sort -r); do
+    snap="${snap%/}"
+    [ -f "$snap/.benos-autoupdate-snapshot" ] || continue
+    n=$((n + 1))
+    old="$(find "$snap/.benos-autoupdate-snapshot" -mtime +"$DAYS" 2>/dev/null)"
+    if [ "$n" -gt "$KEEP" ] || [ -n "$old" ]; then
+      case "$snap" in "$SNAPSHOTS"/2*) rm -rf "$snap" && say "pruned snapshot: $snap" ;; esac
+    fi
+  done
 fi
 
 latest="$(field feed.release.version)"

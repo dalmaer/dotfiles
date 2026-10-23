@@ -256,8 +256,12 @@ folder `documents-cleaner` packs and imports.
 `benos-autoupdate` runs at 4:30am (launchd, after the 3am brew run). The BenOS
 app downloads updates itself but installs one only when it is quit; this
 installs a waiting update overnight: it quits the app, stops the engine,
-refreshes one rolling APFS-clone snapshot at `~/benos-snapshot-autoupdate`,
-reopens the app and makes sure the engine is back on the new version. Whenever
+takes an APFS-clone snapshot in `~/benos-snapshots/`, reopens the app and makes
+sure the engine is back on the new version. Every run prunes snapshots: it keeps
+the newest 2 and deletes any older than 30 days (a clone costs only what the
+library has changed since, so old ones grow). Change either in
+`~/.config/benos-autoupdate.conf` (`KEEP=3`, `DAYS=14`; `KEEP=0` stops taking
+them). Only folders the script made, which carry its marker file, are deleted. Whenever
 the installed version changes, however it changed, a notification says so.
 `benos-autoupdate --check` reports without installing. It does nothing on a
 machine without BenOS. Log: `~/Library/Logs/benos-autoupdate.log`.
