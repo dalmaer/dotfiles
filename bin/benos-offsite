@@ -45,7 +45,11 @@ except Exception: print("")')"
 [ -d "$DEST" ] || { say "backup destination $DEST isn't connected; skipping"; exit 0; }
 
 TARGET="$REMOTE/$(basename "$DEST")"
-FILTER=(--exclude "**/locks/**" --exclude ".DS_Store")
+# restic's repository files never change once written, so they go up with
+# --immutable. owner.json beside each repository is BenOS's small, mutable note
+# about the repository (who owns it, its last backup); it is copied normally,
+# and Object Lock keeps every earlier version of it.
+FILTER=(--exclude "**/locks/**" --exclude ".DS_Store" --exclude "**/owner.json")
 
 if [ "${1:-}" != "--check" ]; then
   say "copying $DEST -> $TARGET"
@@ -53,6 +57,11 @@ if [ "${1:-}" != "--check" ]; then
       --transfers 8 --checkers 16 --stats 5m --stats-one-line --log-level NOTICE; then
     say "error: the copy failed"
     notify "BenOS offsite backup failed" "The copy to $REMOTE didn't finish. See ~/Library/Logs/benos-offsite.log."
+    exit 1
+  fi
+  if ! rclone copy "$DEST" "$TARGET" --include "**/owner.json" --fast-list --log-level NOTICE; then
+    say "error: copying owner.json failed"
+    notify "BenOS offsite backup failed" "Copying owner.json to $REMOTE failed. See ~/Library/Logs/benos-offsite.log."
     exit 1
   fi
 fi
