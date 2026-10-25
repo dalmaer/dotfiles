@@ -51,6 +51,8 @@ TARGET="$REMOTE/$(basename "$DEST")"
 # and Object Lock keeps every earlier version of it.
 FILTER=(--exclude "**/locks/**" --exclude ".DS_Store" --exclude "**/owner.json")
 
+# Files BenOS writes while this runs go up next time; the check skips them.
+START="$(date '+%Y-%m-%d %H:%M:%S')"
 if [ "${1:-}" != "--check" ]; then
   say "copying $DEST -> $TARGET"
   if ! rclone copy "$DEST" "$TARGET" "${FILTER[@]}" --immutable --fast-list \
@@ -67,7 +69,7 @@ if [ "${1:-}" != "--check" ]; then
 fi
 
 say "verifying every file's hash against $TARGET"
-if rclone check "$DEST" "$TARGET" "${FILTER[@]}" --one-way --fast-list --log-level NOTICE; then
+if rclone check "$DEST" "$TARGET" "${FILTER[@]}" --min-age "$START" --one-way --fast-list --log-level NOTICE; then
   say "ok: the cloud copy matches"
 else
   say "error: the cloud copy doesn't match"
