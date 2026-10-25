@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# benos-offsite -- mirror BenOS's (already encrypted) backup repository to
+# cloud storage, and prove the copy matches.
+#
+# Run nightly at 3:30am by launchd (launchd/com.dion.benos-offsite.plist).
+# BenOS backs up to a folder (a USB drive or NAS share). That folder holds a
+# restic repository whose files are encrypted on this Mac and never change once
+# written, so an exact copy elsewhere is an equally good backup, opened with the
+# same keys. This copies it to an rclone remote and then checks every file's
+# hash against the remote.
+#
+#   * never deletes or overwrites remotely (`rclone copy --immutable`): with a
+#     no-delete key and Object Lock on the bucket, nothing on this Mac can damage
+#     the cloud copy;
+#   * finds the repository from `benos backup status`, so it follows BenOS when
+#     backups move to another disk or NAS;
+#   * does nothing if the backup destination isn't connected, or if this Mac has
+#     no ~/.config/benos-offsite.conf (machine-specific, never committed):
+#         REMOTE=b2benos:almaer-benos-backup
+#
+# Safe to run by hand: `benos-offsite` (or `--check` to only verify).
+# Log: ~/Library/Logs/benos-offsite.log
+
+set -uo pipefail
+
+CONF="$HOME/.config/benos-offsite.conf"
+[ -r "$CONF" ] || { echo "benos-offsite: no $CONF on this Mac, nothing to do"; exit 0; }
+REMOTE=""
+# shellcheck disable=SC1090
+. "$CONF"
+[ -n "$REMOTE" ] || { echo "benos-offsite: REMOTE isn't set in $CONF"; exit 0; }
+
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+BENOS="$(command -v benos || true)"
+command -v rclone >/dev/null || { echo "benos-offsite: rclone isn't installed"; exit 1; }
+[ -n "$BENOS" ] || { echo "benos-offsite: benos isn't installed"; exit 0; }
+
+say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+notify() { /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true; }
+
+DEST="$("$BENOS" backup status --json 2>/dev/null | /usr/bin/python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("destination") or "")
+except Exception: print("")')"
+[ -n "$DEST" ] || { say "BenOS has no backup destination; nothing to mirror"; exit 0; }
+[ -d "$DEST" ] || { say "backup destination $DEST isn't connected; skipping"; exit 0; }
+
+TARGET="$REMOTE/$(basename "$DEST")"
+FILTER=(--exclude "**/locks/**" --exclude ".DS_Store")
+
+if [ "${1:-}" != "--check" ]; then
+  say "copying $DEST -> $TARGET"
+  if ! rclone copy "$DEST" "$TARGET" "${FILTER[@]}" --immutable --fast-list \
+      --transfers 8 --checkers 16 --stats 5m --stats-one-line --log-level NOTICE; then
+    say "error: the copy failed"
+    notify "BenOS offsite backup failed" "The copy to $REMOTE didn't finish. See ~/Library/Logs/benos-offsite.log."
+    exit 1
+  fi
+fi
+
+say "verifying every file's hash against $TARGET"
+if rclone check "$DEST" "$TARGET" "${FILTER[@]}" --one-way --fast-list --log-level NOTICE; then
+  say "ok: the cloud copy matches"
+else
+  say "error: the cloud copy doesn't match"
+  notify "BenOS offsite backup check failed" "Some files in $REMOTE don't match. See ~/Library/Logs/benos-offsite.log."
+  exit 1
+fi

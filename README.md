@@ -45,6 +45,7 @@ bin/                  everything here is linked into ~/bin
   ports               what is listening, on either OS
   documents-cleaner   gather screenshots from every Mac, de-duplicate, name by app
   benos-autoupdate    install a waiting BenOS update overnight; notify on a new version
+  benos-offsite       mirror BenOS's encrypted backups to cloud storage and verify them
   nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
 launchd/              LaunchAgent templates, installed on macOS (see below)
 shell/
@@ -265,4 +266,16 @@ them). Only folders the script made, which carry its marker file, are deleted. W
 the installed version changes, however it changed, a notification says so.
 `benos-autoupdate --check` reports without installing. It does nothing on a
 machine without BenOS. Log: `~/Library/Logs/benos-autoupdate.log`.
+
+## Offsite BenOS backups
+
+`benos-offsite` runs at 3:30am (launchd). It copies BenOS's backup repository,
+already encrypted on the Mac, to an rclone remote and then checks every file's
+hash against it. It uses `rclone copy --immutable`, so it never deletes or
+overwrites anything remotely. Pair it with a no-delete application key and
+Object Lock on the bucket. A Mac takes part only if it has
+`~/.config/benos-offsite.conf` (never committed), e.g.
+`REMOTE=b2benos:almaer-benos-backup`; the rclone remote itself lives in
+rclone's own config. `benos-offsite --check` only verifies. Log:
+`~/Library/Logs/benos-offsite.log`.
 
