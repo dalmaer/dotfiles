@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# ledge-email-sync -- keep Gmail stars and Ledge tasks in step, through BenOS.
+#
+# Run every 10 minutes by launchd (launchd/com.dion.ledge-email-sync.plist).
+# `ledge ingest email` reads starred threads from the local BenOS engine:
+# a new star becomes a task, an unstarred thread closes its task, and a task
+# done in Ledge unstars its thread. BenOS does the talking to Gmail.
+#
+# Machine-specific settings live in ~/.env.local (never committed):
+#     LEDGER_BENOS_MODE=local
+#     LEDGER_BENOS_NODE=<benos node-id>
+#     LEDGER_BENOS_SOURCES=<the Gmail instance>
+# The Ledge checkout defaults to ~/code/ledger (set LEDGER_CODE to change it).
+#
+# Safe to run by hand: `ledge-email-sync` (or `--dry-run` to only report).
+# Does nothing on a machine without those settings or without the checkout.
+# Log: ~/Library/Logs/ledge-email-sync.log
+
+set -uo pipefail
+
+# shellcheck disable=SC1091
+[ -r "$HOME/.env.local" ] && . "$HOME/.env.local"
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+CODE="${LEDGER_CODE:-$HOME/code/ledger}"
+[ -n "${LEDGER_BENOS_MODE:-}" ] || { echo "ledge-email-sync: LEDGER_BENOS_MODE isn't set; nothing to do"; exit 0; }
+[ -f "$CODE/cli/ledge.ts" ] || { echo "ledge-email-sync: no Ledge checkout at $CODE"; exit 0; }
+command -v node >/dev/null || { echo "ledge-email-sync: node isn't installed"; exit 1; }
+
+say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+cd "$CODE" || exit 1
+say "ledge ingest email $*"
+node cli/ledge.ts ingest email "$@" 2>&1
+status=$?
+[ "$status" -eq 0 ] || say "error: ledge ingest email exited $status"
+exit "$status"
