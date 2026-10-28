@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# benos-autoupdate -- install a downloaded BenOS update overnight, and say so.
+# benos-autoupdate -- tell when a BenOS update is downloaded; install it overnight
+# or when asked.
 #
-# Run at 4:30am by launchd (launchd/com.dion.benos-autoupdate.plist), after the
-# 3am brew run. The BenOS app downloads updates by itself but only installs one
+# Run hourly by launchd (launchd/com.dion.benos-autoupdate.plist). Installs
+# happen only in the 4am run, after the 3am brew run, and only with
+# AUTO_INSTALL=1 (the default); with AUTO_INSTALL=0 an update waits for
+# `benos-autoupdate --install`. The BenOS app downloads updates by itself but only installs one
 # when it is quit, which can be weeks; and when it does, nobody is told. This:
 #
 #   1. asks `benos version --json` what is installed and whether a newer build
@@ -12,7 +15,9 @@
 #      reopens the app (which installs the update) and makes sure the engine is
 #      back on the new version -- after a manual stop, launchd doesn't restart it;
 #   3. notifies whenever the installed version differs from the last one seen,
-#      whether this script installed it or the app did on a quit.
+#      whether this script installed it or the app did on a quit;
+#   4. notifies once per version when one is downloaded and waiting, so it can
+#      be installed by hand (`benos-autoupdate --install`).
 #
 # Snapshots live in ~/benos-snapshots/<date>-<from>-to-<to>, and every run
 # prunes them: keep the newest KEEP (default 2), and delete any older than DAYS
@@ -21,7 +26,8 @@
 # (`KEEP=3`, `DAYS=14`; KEEP=0 turns snapshots off). Only folders this script
 # made are ever deleted.
 #
-# Safe to run by hand: `benos-autoupdate` (or `--check` to only report).
+# Safe to run by hand: `benos-autoupdate --install` installs a waiting update
+# now; `--check` only reports.
 # Does nothing on a machine without BenOS. Log: ~/Library/Logs/benos-autoupdate.log
 
 set -uo pipefail
@@ -35,14 +41,23 @@ DATA_DIR="${BENOS_DATA_DIR:-$HOME/benos}"
 SNAPSHOTS="$HOME/benos-snapshots"
 KEEP=2
 DAYS=30
+AUTO_INSTALL=1
 # shellcheck disable=SC1090
 [ -r "$HOME/.config/benos-autoupdate.conf" ] && . "$HOME/.config/benos-autoupdate.conf"
 case "$KEEP" in ''|*[!0-9]*) KEEP=2 ;; esac
 case "$DAYS" in ''|*[!0-9]*) DAYS=30 ;; esac
 STATE_DIR="$HOME/.local/state/benos-autoupdate"
 LAST="$STATE_DIR/last-version"
-CHECK_ONLY=0
-[ "${1:-}" = "--check" ] && CHECK_ONLY=1
+SEEN="$STATE_DIR/notified-pending"
+case "${1:-}" in
+  --check) MODE=check ;;
+  --install) MODE=install ;;
+  *) MODE=scheduled ;;
+esac
+# A scheduled run installs only at 4am, and only when AUTO_INSTALL=1.
+INSTALL=0
+[ "$MODE" = "install" ] && INSTALL=1
+[ "$MODE" = "scheduled" ] && [ "$AUTO_INSTALL" = "1" ] && [ "$(date +%H)" = "04" ] && INSTALL=1
 mkdir -p "$STATE_DIR"
 
 say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
@@ -76,7 +91,7 @@ verdict="$(field verdict)"
 installed="$(field app.version)"
 say "installed ${installed:-?}, verdict ${verdict:-?}"
 
-if [ "$CHECK_ONLY" = "0" ] && { [ "$verdict" = "downloaded" ] || [ "$verdict" = "engine-behind" ]; }; then
+if [ "$INSTALL" = "1" ] && { [ "$verdict" = "downloaded" ] || [ "$verdict" = "engine-behind" ]; }; then
   target="$(field pending.version)"
   say "installing ${target:-the update} (verdict $verdict)"
 
@@ -111,6 +126,16 @@ if [ "$CHECK_ONLY" = "0" ] && { [ "$verdict" = "downloaded" ] || [ "$verdict" = 
     exit 1
   fi
   installed="$(field app.version)"
+fi
+
+# Tell once per version when an update is downloaded and waiting to be installed.
+if [ "$verdict" = "downloaded" ] && [ "$INSTALL" = "0" ]; then
+  pending="$(field pending.version)"
+  if [ -n "$pending" ] && [ "$pending" != "$(cat "$SEEN" 2>/dev/null || true)" ]; then
+    say "downloaded, waiting to install: $pending"
+    notify "BenOS $pending is ready to install" "Installed: ${installed:-?}. Ask Claude to install it (benos-autoupdate --install)."
+    printf '%s\n' "$pending" > "$SEEN"
+  fi
 fi
 
 # Tell when the version changed since the last run, however it changed.

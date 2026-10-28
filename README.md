@@ -44,7 +44,7 @@ bin/                  everything here is linked into ~/bin
   mkscript            scaffold a new ~/bin script
   ports               what is listening, on either OS
   documents-cleaner   gather screenshots from every Mac, de-duplicate, name by app
-  benos-autoupdate    install a waiting BenOS update overnight; notify on a new version
+  benos-autoupdate    notify when a BenOS update is waiting; install it overnight or on --install
   benos-offsite       mirror BenOS's encrypted backups to cloud storage and verify them
   ledge-email-sync    keep Gmail stars and Ledge tasks in step, through BenOS (every 10 min)
   nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
@@ -255,9 +255,11 @@ folder `documents-cleaner` packs and imports.
 
 ## BenOS updates
 
-`benos-autoupdate` runs at 4:30am (launchd, after the 3am brew run). The BenOS
-app downloads updates itself but installs one only when it is quit; this
-installs a waiting update overnight: it quits the app, stops the engine,
+`benos-autoupdate` runs hourly (launchd). When the BenOS app has downloaded an
+update, it notifies once per version. The 4am run (after the 3am brew run)
+installs a waiting update, unless `AUTO_INSTALL=0` is in
+`~/.config/benos-autoupdate.conf`; then it waits for
+`benos-autoupdate --install`. Installing quits the app, stops the engine,
 takes an APFS-clone snapshot in `~/benos-snapshots/`, reopens the app and makes
 sure the engine is back on the new version. Every run prunes snapshots: it keeps
 the newest 2 and deletes any older than 30 days (a clone costs only what the
@@ -265,7 +267,7 @@ library has changed since, so old ones grow). Change either in
 `~/.config/benos-autoupdate.conf` (`KEEP=3`, `DAYS=14`; `KEEP=0` stops taking
 them). Only folders the script made, which carry its marker file, are deleted. Whenever
 the installed version changes, however it changed, a notification says so.
-`benos-autoupdate --check` reports without installing. It does nothing on a
+`benos-autoupdate --check` reports without installing or notifying. It does nothing on a
 machine without BenOS. Log: `~/Library/Logs/benos-autoupdate.log`.
 
 ## Offsite BenOS backups
