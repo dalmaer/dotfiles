@@ -46,6 +46,7 @@ bin/                  everything here is linked into ~/bin
   documents-cleaner   gather screenshots from every Mac, de-duplicate, name by app
   benos-autoupdate    notify when a BenOS update is waiting; install it overnight or on --install
   benos-offsite       mirror BenOS's encrypted backups to cloud storage and verify them
+  git-tidy            weekly: remove finished agent worktrees and merged branches in ~/code
   ledge-email-sync    keep Gmail stars and Ledge tasks in step, through BenOS (every 10 min)
   nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
 launchd/              LaunchAgent templates, installed on macOS (see below)
@@ -282,3 +283,17 @@ Object Lock on the bucket. A Mac takes part only if it has
 rclone's own config. `benos-offsite --check` only verifies. Log:
 `~/Library/Logs/benos-offsite.log`.
 
+
+## Git tidy
+
+`git-tidy` runs Sundays at 10am (launchd). Claude and Codex sessions leave a
+worktree and a branch behind per task; this clears the finished ones in every
+repository under `~/code`. It only removes a worktree that is clean and untouched
+for 7 days whose work is on GitHub or merged through a pull request (an agent's
+own worktree with commits only on this Mac is bundled first, after 14 days), and
+only deletes branches that are on GitHub, merged, or agent leftovers. Every
+deleted branch is saved first to a git bundle in `~/Backups/git-leftovers/`.
+Uncommitted changes are never touched; they're listed in the log and in a
+notification. `git-tidy --dry-run` shows what it would do. Settings:
+`~/.config/git-tidy.conf` (`MIN_AGE`, `ARCHIVE_AFTER`, `SKIP`). Log:
+`~/Library/Logs/git-tidy.log`.

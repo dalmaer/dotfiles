@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# git-tidy -- clear out finished agent worktrees and merged branches in ~/code.
+#
+# Run weekly by launchd (launchd/com.dion.git-tidy.plist). Claude and Codex
+# sessions leave a worktree and a branch behind for each task; once the work is
+# on GitHub they are clutter. For every git repository directly under ~/code:
+#
+#   * fetches with --prune, so branches deleted on GitHub show as gone;
+#   * removes a linked worktree only when it is clean (no uncommitted or
+#     untracked files), untouched for MIN_AGE days, not under a SKIP path
+#     (Codex manages ~/.codex/worktrees itself), and its work is safe: on
+#     GitHub, merged through a pull request, or -- for an agent's worktree
+#     untouched for ARCHIVE_AFTER days -- saved to a bundle first.
+#     `git worktree remove` is never forced, so git refuses anything dirty;
+#   * deletes a local branch only when it is checked out nowhere, is not the
+#     default branch, its last commit is MIN_AGE days old, and every commit is
+#     on GitHub, or its pull request merged, or it is an agent's leftover
+#     (`worktree-agent-*`) ARCHIVE_AFTER days old. Other branches with commits
+#     only on this Mac are listed in the log and kept;
+#   * writes every branch it deletes to a git bundle in BUNDLES first, so any of
+#     them can be restored (`git fetch <bundle> 'refs/heads/*:refs/heads/*'`).
+#
+# Uncommitted changes are never touched: a worktree holding them for MIN_AGE
+# days is listed in the log and in one notification.
+#
+# Settings in ~/.config/git-tidy.conf (optional): CODE, MIN_AGE (days, default
+# 7), ARCHIVE_AFTER (days, default 14), BUNDLES, SKIP (space-separated path
+# prefixes).
+#
+# Safe to run by hand: `git-tidy --dry-run` reports without changing anything.
+# Log: ~/Library/Logs/git-tidy.log
+
+set -uo pipefail
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+CODE="$HOME/code"
+MIN_AGE=7
+ARCHIVE_AFTER=14
+BUNDLES="$HOME/Backups/git-leftovers"
+SKIP="$HOME/.codex/worktrees"
+# shellcheck disable=SC1091
+[ -r "$HOME/.config/git-tidy.conf" ] && . "$HOME/.config/git-tidy.conf"
+case "$MIN_AGE" in ''|*[!0-9]*) MIN_AGE=7 ;; esac
+case "$ARCHIVE_AFTER" in ''|*[!0-9]*) ARCHIVE_AFTER=14 ;; esac
+DRY=0
+[ "${1:-}" = "--dry-run" ] && DRY=1
+
+say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+notify() {
+  /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true
+}
+now=$(date +%s)
+cutoff=$((now - MIN_AGE * 86400))
+archive_cutoff=$((now - ARCHIVE_AFTER * 86400))
+today=$(date +%Y%m%d)
+removed_wt=0; deleted_br=0; attention=()
+
+skipped() { local p; for p in $SKIP; do case "$1" in "$p"*) return 0 ;; esac; done; return 1; }
+
+# Newest of a worktree's git activity (HEAD, reflog) and its last commit. Not the
+# index: `git status` rewrites it, so it would make every worktree look fresh.
+wt_age() {
+  local wt="$1" gd t newest=0
+  gd=$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null) || { echo "$now"; return; }
+  for f in "$gd/HEAD" "$gd/logs/HEAD"; do
+    [ -e "$f" ] && t=$(stat -f %m "$f") && [ "$t" -gt "$newest" ] && newest=$t
+  done
+  t=$(git -C "$wt" log -1 --format=%ct 2>/dev/null || echo 0)
+  [ "$t" -gt "$newest" ] && newest=$t
+  echo "$newest"
+}
+
+# Worktrees Claude, Codex and Conductor sessions make for a task.
+agent_made() {
+  case "$1" in
+    */.claude/worktrees/*|"$HOME"/Documents/Codex/*|/private/tmp/*|/tmp/*|*/.conductor/*) return 0 ;;
+  esac
+  return 1
+}
+
+on_github() { [ "$(git -C "$1" rev-list --count "$2" --not --remotes 2>/dev/null || echo 1)" = 0 ]; }
+
+# Whether a pull request from this branch was merged (squash merges leave the
+# branch's own commits off main). Asks GitHub once per repository.
+pr_merged() {
+  if [ -z "$merged_heads" ]; then
+    merged_heads=$(gh pr list -R "$slug" --state merged --limit 1000 --json headRefName -q '.[].headRefName' 2>/dev/null || true)
+    merged_heads="${merged_heads:- }"
+  fi
+  printf '%s\n' "$merged_heads" | grep -qxF "$1"
+}
+
+for repo in "$CODE"/*/; do
+  repo="${repo%/}"
+  # Main checkouts only: a linked worktree's .git is a file.
+  [ -d "$repo/.git" ] || continue
+  name=$(basename "$repo")
+  git -C "$repo" remote | grep -q . || continue
+  git -C "$repo" fetch -q --all --prune 2>/dev/null || { say "$name: fetch failed, skipped"; continue; }
+  [ "$DRY" = 1 ] || git -C "$repo" worktree prune 2>/dev/null
+  slug=$(git -C "$repo" remote get-url origin 2>/dev/null | sed -E 's#(\.git)?$##; s#.*github\.com[:/]##')
+  merged_heads=""
+
+  # 1. Linked worktrees.
+  first=1
+  while IFS= read -r line; do
+    case "$line" in worktree\ *) wt="${line#worktree }" ;; *) continue ;; esac
+    [ "$first" = 1 ] && { first=0; continue; }   # the main checkout
+    [ -d "$wt" ] || continue
+    skipped "$wt" && continue
+    git -C "$repo" worktree list --porcelain | grep -A4 -F "worktree $wt" | grep -q '^locked' && continue
+    dirty=$(git --no-optional-locks -C "$wt" status --porcelain 2>/dev/null | head -1)
+    if [ -n "$dirty" ]; then
+      [ "$(wt_age "$wt")" -lt "$cutoff" ] && attention+=("$name: uncommitted changes in $wt")
+      continue
+    fi
+    age=$(wt_age "$wt")
+    [ "$age" -gt "$cutoff" ] && continue
+    br=$(git -C "$wt" symbolic-ref -q --short HEAD 2>/dev/null || true)
+    if ! on_github "$wt" HEAD && ! { [ -n "$br" ] && pr_merged "$br"; }; then
+      # Work only on this Mac, but clean and untouched for ARCHIVE_AFTER days:
+      # saved to a bundle, then removed like the rest.
+      if [ "$age" -gt "$archive_cutoff" ] || ! agent_made "$wt"; then
+        attention+=("$name: commits only on this Mac in $wt")
+        continue
+      fi
+      if [ "$DRY" = 0 ]; then
+        mkdir -p "$BUNDLES"
+        ref="refs/heads/${br:-$(basename "$wt")-detached}"
+        bundle="$BUNDLES/$name-$(basename "$wt")-$today.bundle"
+        git -C "$wt" update-ref "refs/tidy/keep" HEAD
+        if ! { git -C "$wt" bundle create "$bundle" "${br:+refs/heads/$br}" refs/tidy/keep >/dev/null 2>&1 \
+               && git -C "$wt" bundle verify -q "$bundle" >/dev/null 2>&1; }; then
+          git -C "$wt" update-ref -d refs/tidy/keep
+          say "$name: couldn't bundle $wt, kept it"; continue
+        fi
+        git -C "$wt" update-ref -d refs/tidy/keep
+        say "$name: saved $ref from $wt in $bundle"
+      fi
+    fi
+    if [ "$DRY" = 1 ]; then
+      say "$name: would remove worktree $wt"
+    elif git -C "$repo" worktree remove "$wt" 2>/dev/null; then
+      say "$name: removed worktree $wt"; removed_wt=$((removed_wt + 1))
+    else
+      say "$name: git kept worktree $wt"
+    fi
+  done < <(git -C "$repo" worktree list --porcelain)
+
+  # 2. Branches.
+  default=$(git -C "$repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
+  default="${default#origin/}"
+  inuse=$(git -C "$repo" worktree list --porcelain | sed -n 's#^branch refs/heads/##p')
+  doomed=()
+  while read -r br track; do
+    case "$br" in main|master|"$default") continue ;; esac
+    printf '%s\n' "$inuse" | grep -qxF "$br" && continue
+    [ "$(git -C "$repo" log -1 --format=%ct "refs/heads/$br")" -lt "$cutoff" ] || continue
+    if on_github "$repo" "refs/heads/$br"; then
+      doomed+=("$br")
+    elif [ "$track" = "[gone]" ] && pr_merged "$br"; then
+      doomed+=("$br")
+    elif [ "${br#worktree-agent-}" != "$br" ] \
+         && [ "$(git -C "$repo" log -1 --format=%ct "refs/heads/$br")" -lt "$archive_cutoff" ]; then
+      # An agent's leftover, untouched for ARCHIVE_AFTER days: bundled below.
+      doomed+=("$br")
+    else
+      say "$name: kept $br (commits only on this Mac)"
+    fi
+  done < <(git -C "$repo" for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads)
+
+  [ "${#doomed[@]}" -gt 0 ] || continue
+  if [ "$DRY" = 1 ]; then
+    say "$name: would delete ${#doomed[@]} branch(es): ${doomed[*]}"
+    continue
+  fi
+  mkdir -p "$BUNDLES"
+  bundle="$BUNDLES/$name-$today-$(date +%H%M%S).bundle"
+  refs=(); for b in "${doomed[@]}"; do refs+=("refs/heads/$b"); done
+  if git -C "$repo" bundle create "$bundle" "${refs[@]}" >/dev/null 2>&1 \
+     && git -C "$repo" bundle verify -q "$bundle" >/dev/null 2>&1; then
+    git -C "$repo" branch -D "${doomed[@]}" >/dev/null 2>&1
+    deleted_br=$((deleted_br + ${#doomed[@]}))
+    say "$name: deleted ${#doomed[@]} branch(es), saved in $bundle"
+  else
+    say "$name: couldn't write the bundle, deleted nothing"
+  fi
+done
+
+for a in "${attention[@]+"${attention[@]}"}"; do say "needs you: $a"; done
+say "done: $removed_wt worktree(s) removed, $deleted_br branch(es) deleted, ${#attention[@]} left for you"
+if [ "$DRY" = 0 ] && [ "${#attention[@]}" -gt 0 ]; then
+  notify "git-tidy: ${#attention[@]} worktree(s) hold work" "Unpushed or uncommitted work older than $MIN_AGE days. See ~/Library/Logs/git-tidy.log"
+fi
