@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template. install.sh / `dot link` replace __HOME__ with this machine's home
+  directory and copy the result to ~/Library/LaunchAgents: launchd expands
+  neither ~ nor $HOME, so the installed copy has to carry real paths.
+  Edit this file, not the installed copy, then run `dot link`.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dion.benos-handoff</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HOME__/bin/benos-handoff</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/benos-handoff.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/benos-handoff.log</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+</dict>
+</plist>

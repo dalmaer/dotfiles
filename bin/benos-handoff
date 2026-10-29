@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# benos-handoff -- tell when Ben's side hands something to Dion on bgalbs/benos3.
+#
+# Run every 15 minutes by launchd (launchd/com.dion.benos-handoff.plist). Lists
+# the open issues and PRs labelled `for: dalmaer` (the hand-off convention in
+# bgalbs/benos3#1074), writes them to INBOX for an agent to read, and notifies
+# once for each item that is new or has a new comment since the last run.
+# Nothing on GitHub is changed.
+#
+# Settings in ~/.config/benos-handoff.conf (optional): REPO, LABEL, INBOX.
+#
+# Safe to run by hand: `benos-handoff` prints the list; `--quiet` skips the
+# notification. Log: ~/Library/Logs/benos-handoff.log
+
+set -uo pipefail
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+REPO="bgalbs/benos3"
+LABEL="for: dalmaer"
+STATE="$HOME/.local/state/benos-handoff"
+INBOX="$STATE/inbox.md"
+# shellcheck disable=SC1091
+[ -r "$HOME/.config/benos-handoff.conf" ] && . "$HOME/.config/benos-handoff.conf"
+
+QUIET=0
+[ "${1:-}" = "--quiet" ] && QUIET=1
+
+notify() {
+  [ "$QUIET" = 1 ] && return 0
+  /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true
+}
+
+mkdir -p "$STATE"
+echo "== $(date '+%F %T')"
+
+# One line per item: kind<TAB>number<TAB>updatedAt<TAB>title<TAB>url
+fields='.[] | [.number, .updatedAt, .title, .url] | @tsv'
+issues=$(gh issue list --repo "$REPO" --label "$LABEL" --state open --limit 100 \
+  --json number,updatedAt,title,url --jq "$fields" 2>&1) || { echo "gh issue list failed: $issues"; exit 1; }
+prs=$(gh pr list --repo "$REPO" --label "$LABEL" --state open --limit 100 \
+  --json number,updatedAt,title,url --jq "$fields" 2>&1) || { echo "gh pr list failed: $prs"; exit 1; }
+current=$( { [ -n "$issues" ] && sed 's/^/issue\t/' <<<"$issues"; [ -n "$prs" ] && sed 's/^/pr\t/' <<<"$prs"; } | sort -t$'\t' -k2,2n)
+
+{
+  echo "# Waiting on Dion's side ($LABEL on $REPO)"
+  echo
+  echo "Checked $(date '+%F %T'). Read each thread, catch Dion up, and reply there; swap the label back to \`for: bgalbs\` (or remove it) when done."
+  echo
+  if [ -z "$current" ]; then echo "Nothing waiting."; fi
+  while IFS=$'\t' read -r kind num upd title url; do
+    [ -n "$kind" ] && echo "- $kind #$num: $title ($url), updated $upd"
+  done <<<"$current"
+} >"$INBOX.tmp" && mv "$INBOX.tmp" "$INBOX"
+
+# Items that are new, or updated since the last run.
+seen="$STATE/seen.tsv"
+touch "$seen"
+fresh=()
+while IFS=$'\t' read -r kind num upd title _url; do
+  [ -z "$kind" ] && continue
+  grep -qxF "$kind	$num	$upd" "$seen" || fresh+=("#$num $title")
+done <<<"$current"
+cut -f1-3 <<<"$current" >"$seen"
+
+echo "waiting: $(grep -c . <<<"$current" || true), new or updated: ${#fresh[@]}"
+[ -t 1 ] && cat "$INBOX"
+if [ "${#fresh[@]}" -eq 1 ]; then
+  notify "Ben handed you something" "${fresh[0]}"
+elif [ "${#fresh[@]}" -gt 1 ]; then
+  notify "Ben handed you ${#fresh[@]} things" "${fresh[0]} and $(( ${#fresh[@]} - 1 )) more"
+fi
+exit 0
