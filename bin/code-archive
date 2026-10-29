@@ -692,8 +692,9 @@ lock() {
 
 setup_run() {
   mkdir -p "$LOG_DIR"
-  # A terminal sees the log as it's written; launchd's output goes only to it.
-  if [ -t 1 ]; then exec > >(tee -a "$LOG") 2>&1; else exec >>"$LOG" 2>&1; fi
+  # A terminal (and park, whose verdict is for whoever ran it) sees the log as
+  # it's written; a scheduled run's output goes only to the log.
+  if [ -t 1 ] || [ "${1:-}" = show ]; then exec > >(tee -a "$LOG") 2>&1; else exec >>"$LOG" 2>&1; fi
   RUN=$(mktemp -d "${TMPDIR:-/tmp}/code-archive.XXXXXX") || die "no temp dir"
   RCLOG="$LOG_DIR/code-$(date +%Y%m%d)-rclone.log"
   lock
@@ -737,7 +738,7 @@ cmd_park() {
   local arg="${1:-}"; [ -n "$arg" ] || usage 2
   local line; line=$(find_project "$arg")
   [ -n "$line" ] || die "no project '$arg' under $CODE (or it's a worktree / skipped)"
-  setup_run
+  setup_run show
   local tier name path mode
   IFS=$'\t' read -r tier name path mode <<<"$line"
   say "== code-archive park $tier/$name$([ "$DRY" = 1 ] && echo ' --dry-run')"
