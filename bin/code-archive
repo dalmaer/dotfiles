@@ -321,7 +321,8 @@ def repo_info(repo, sub):
     remotes = []
     for r in out1('remote').split():
         remotes.append({'name': r, 'url': out1('remote', 'get-url', r)})
-    refs = out1('for-each-ref', '--format=%(refname) %(objectname)')
+    refs = 'bundle-v2\n' + out1('for-each-ref', '--format=%(refname) %(objectname)') + \
+        '\nstashes ' + out1('log', '-g', '--format=%H', 'refs/stash')
     refs_hash = hashlib.sha1(refs.encode()).hexdigest()
     reason = ''
     if has_commits:
@@ -369,13 +370,15 @@ def repo_info(repo, sub):
                     dirty_wt.append(wt)
     if reason and repo in REPAIRED:
         reason += '; export lacked .git/HEAD, bundled from a repaired copy'
+    rc, o = git(repo, 'status', '--porcelain')
+    dirty = len([l for l in o.splitlines() if l.strip()]) if rc == 0 else None
     rel = '_history/%s%s.bundle' % (name, '' if sub == '.' else '/' + sub)
     return {'path': sub, 'head': head, 'default_branch': default, 'last_commit': last,
             'remotes': [{'name': r['name'], 'url': clean_url(r['url'])} for r in remotes],
             'needs_bundle': bool(reason), 'reason': reason, 'refs_hash': refs_hash,
             'bundle': ('secret' if secret_hist else 'plain') if reason else None,
             'bundle_file': rel if reason else None, 'dirty_worktrees': dirty_wt,
-            'gitdir': REPAIRED.get(repo, '')}
+            'gitdir': REPAIRED.get(repo, ''), 'dirty': dirty}
 
 vcs = 'none'
 if mode == 'loose':
@@ -429,8 +432,11 @@ bundled = [r for r in repos if r['needs_bundle']]
 manifest = {'name': name, 'tier': tier, 'source_path': src, 'vcs': vcs,
             'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'files': len(plain), 'secret_files': len(secret),
+            # rclone keeps no permissions: fetch puts the executable bits back.
+            'executables': [f for f in files if not os.path.islink(os.path.join(src, f))
+                            and os.lstat(os.path.join(src, f)).st_mode & 0o100],
             'repos': [{k: r[k] for k in ('path', 'head', 'default_branch', 'remotes',
-                                         'bundle', 'bundle_file')} for r in repos]}
+                                         'bundle', 'bundle_file', 'dirty')} for r in repos]}
 json.dump(manifest, open(os.path.join(out, 'manifest.json'), 'w'), indent=1)
 row = {'name': name, 'tier': tier, 'vcs': vcs, 'source_path': src,
        'remote_urls': ' '.join(sorted({x['url'] for x in root['remotes']})) if root else '',
@@ -563,6 +569,28 @@ put() {
   [ "$rc" = 0 ] || { printf '%s\n' "$out" | grep -E 'ERROR|differences' | tail -3; return 1; }
 }
 
+# make_bundle <repo> <gitdir or ""> <bundle> <scratch>: `git bundle --all`, plus
+# every stash entry. A stash past the newest lives only in the reflog, which a
+# bundle doesn't carry, so this bundles a scratch repository that borrows the
+# source's objects (alternates) and holds its refs plus refs/stashes/<n>. The
+# source repository is only read.
+make_bundle() {
+  local repo="$1" gd="$2" bundle="$3" stage="$4" i=0 sha head
+  [ -n "$gd" ] || gd=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir) || return 1
+  rm -rf "$stage"; git init -q --bare "$stage" || return 1
+  { echo "$gd/objects"; cat "$gd/objects/info/alternates" 2>/dev/null; } >"$stage/objects/info/alternates"
+  {
+    git --git-dir="$gd" for-each-ref --format='create %(refname) %(objectname)'
+    for sha in $(git --git-dir="$gd" log -g --format=%H refs/stash 2>/dev/null); do
+      echo "create refs/stashes/$i $sha"; i=$((i + 1))
+    done
+  } | git --git-dir="$stage" update-ref --stdin || return 1
+  head=$(git -C "$repo" symbolic-ref -q HEAD 2>/dev/null || git --git-dir="$gd" symbolic-ref -q HEAD)
+  [ -z "$head" ] || git --git-dir="$stage" symbolic-ref HEAD "$head"
+  git --git-dir="$stage" bundle create -q "$bundle" --all && git --git-dir="$stage" bundle verify -q "$bundle" >/dev/null 2>&1
+  local rc=$?; rm -rf "$stage"; return $rc
+}
+
 # archive <tier> <name> <path> <mode>: everything for one project. Sets $out.
 archive() {
   local tier="$1" name="$2" src="$3" mode="$4" sub hash where rel why st tmp
@@ -597,9 +625,7 @@ archive() {
     [ "$DRY" = 1 ] && { say "  would bundle $sub -> $rel"; pending=$((pending + 1)); continue; }
     tmp="$RUN/bundle"; rm -rf "$tmp"; mkdir -p "$tmp/$(dirname "$rel")"
     local repo="$src"; [ "$sub" = "." ] || repo="$src/$sub"
-    local g=(git -C "$repo"); [ -z "$gitdir" ] || g=(git --git-dir="$gitdir")
-    if ! "${g[@]}" bundle create -q "$tmp/$rel" --all 2>>"$out/plan.err" \
-       || ! "${g[@]}" bundle verify -q "$tmp/$rel" >/dev/null 2>&1; then
+    if ! make_bundle "$repo" "$gitdir" "$tmp/$rel" "$RUN/stage.git" 2>>"$out/plan.err"; then
       if [ -n "$gitdir" ]; then
         # A repaired export copy can be missing objects too: files only.
         say "  $rel: history in the export is incomplete, can't bundle; files archived without it"
@@ -762,6 +788,11 @@ cmd_fetch() {
     "${RC[@]}" copy "$SECRET_REMOTE/$tier/$name" "$to" --stats 0 || die "secret restore failed"
     say "  $nsec secret file(s) restored from $SECRET_REMOTE"
   fi
+  "$PY" -I -c 'import json,os,stat,sys
+for f in json.load(open(sys.argv[1])).get("executables", []):
+    p = os.path.join(sys.argv[2], f)
+    if os.path.isfile(p) and not os.path.islink(p):
+        os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)' "$RUN/manifest.json" "$to"
   # Repositories, outermost first: path, head, bundle location, bundle file, remotes.
   "$PY" -I -c 'import json,sys
 for r in sorted(json.load(open(sys.argv[1]))["repos"], key=lambda r: (r["path"] != ".", r["path"].count("/"))):
@@ -776,6 +807,15 @@ for r in sorted(json.load(open(sys.argv[1]))["repos"], key=lambda r: (r["path"] 
       local base="$REMOTE/$tier"; [ "$where" = secret ] && base="$SECRET_REMOTE/$tier"
       rclone copyto "$base/$bfile" "$RUN/h.bundle" || { say "  $sub: bundle download failed"; continue; }
       git -C "$repo" fetch -q --update-head-ok "$RUN/h.bundle" 'refs/*:refs/*' || { say "  $sub: bundle fetch failed"; continue; }
+      # refs/stashes/0 is the newest; store oldest first to rebuild `git stash list`.
+      local stashes; stashes=$(git -C "$repo" for-each-ref --format='%(refname)' 'refs/stashes/' | sort -t/ -k3 -rn)
+      if [ -n "$stashes" ]; then
+        git -C "$repo" update-ref -d refs/stash 2>/dev/null
+        for r in $stashes; do
+          git -C "$repo" stash store -q -m "$(git -C "$repo" log -1 --format=%s "$r")" "$(git -C "$repo" rev-parse "$r")"
+          git -C "$repo" update-ref -d "$r"
+        done
+      fi
       rm -f "$RUN/h.bundle"
       say "  $sub: history from $bfile"
     elif [ -n "$remotes" ]; then
@@ -795,7 +835,10 @@ for r in sorted(json.load(open(sys.argv[1]))["repos"], key=lambda r: (r["path"] 
       *) git -C "$repo" symbolic-ref HEAD "refs/heads/$head" ;;
     esac
     git -C "$repo" reset -q 2>/dev/null
-    say "  $sub: on ${head:-?}, $(git -C "$repo" status --porcelain | wc -l | tr -d ' ') path(s) differ from HEAD (as when archived)"
+    local was; was=$("$PY" -I -c 'import json,sys
+r=[r for r in json.load(open(sys.argv[1]))["repos"] if r["path"]==sys.argv[2]]
+print("" if not r or r[0].get("dirty") is None else r[0]["dirty"])' "$RUN/manifest.json" "$sub")
+    say "  $sub: on ${head:-?}, $(git -C "$repo" status --porcelain | wc -l | tr -d ' ') path(s) differ from HEAD${was:+ ($was when archived)}, $(git -C "$repo" stash list | wc -l | tr -d ' ') stash(es)"
   done <"$RUN/repos.tsv"
   say "restored $tier/$name into $to"
 }
