@@ -13,3 +13,27 @@
 export DOTFILES="${DOTFILES:-$HOME/.dotfiles}"
 
 [ -r "$DOTFILES/shell/env.sh" ] && . "$DOTFILES/shell/env.sh"
+
+# macOS path_helper reorders PATH in child login shells (ones started by an app,
+# an agent or launchd with PATH already set) even when env.sh's inherited guard
+# skips setup, so /usr/bin and /usr/local/bin end up ahead of Homebrew and
+# ~/.bun, ~/.npm-global... Put every non-system directory back in front, in the
+# order it already had, as a fresh Terminal gets it.
+typeset -U path
+_dotfiles_front=() _dotfiles_system=()
+for _d in "${path[@]}"; do
+  case "$_d" in
+    /usr/local/bin|/usr/local/sbin|/usr/bin|/bin|/usr/sbin|/sbin|/System/*|/Library/Apple/*|/var/run/com.apple.*|/Applications/*)
+      _dotfiles_system+=("$_d") ;;
+    *) _dotfiles_front+=("$_d") ;;
+  esac
+done
+path=("${_dotfiles_front[@]}" "${_dotfiles_system[@]}")
+unset _d _dotfiles_front _dotfiles_system
+
+# Keep the parent's selected fnm version first; interactive shells still
+# initialize their own fnm directory-change hooks.
+if [ -n "${FNM_MULTISHELL_PATH:-}" ] && [ -x "$FNM_MULTISHELL_PATH/bin/node" ]; then
+  path=("$FNM_MULTISHELL_PATH/bin" "${path[@]}")
+fi
+export PATH
