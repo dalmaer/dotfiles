@@ -14,9 +14,12 @@
 #     the cloud copy;
 #   * finds the repository from `benos backup status`, so it follows BenOS when
 #     backups move to another disk or NAS;
-#   * does nothing if the backup destination isn't connected, or if this Mac has
-#     no ~/.config/benos-offsite.conf (machine-specific, never committed):
-#         REMOTE=b2benos:almaer-benos-backup
+#   * copies to every remote listed in ~/.config/benos-offsite.conf
+#     (machine-specific, never committed), checking each; does nothing if the
+#     backup destination isn't connected or this Mac has no such file:
+#         REMOTES="b2benos:almaer-benos-backup gdrive:Backups/BenOS"
+#     B2 is the copy nothing here can damage (no-delete key, Object Lock);
+#     Drive is a second copy, and stops at Google's 750 GB/day upload limit.
 #
 # Safe to run by hand: `benos-offsite` (or `--check` to only verify).
 # Log: ~/Library/Logs/benos-offsite.log
@@ -25,10 +28,11 @@ set -uo pipefail
 
 CONF="$HOME/.config/benos-offsite.conf"
 [ -r "$CONF" ] || { echo "benos-offsite: no $CONF on this Mac, nothing to do"; exit 0; }
-REMOTE=""
+REMOTE=""; REMOTES=""
 # shellcheck disable=SC1090
 . "$CONF"
-[ -n "$REMOTE" ] || { echo "benos-offsite: REMOTE isn't set in $CONF"; exit 0; }
+REMOTES="${REMOTES:-$REMOTE}"
+[ -n "$REMOTES" ] || { echo "benos-offsite: REMOTES isn't set in $CONF"; exit 0; }
 
 PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 BENOS="$(command -v benos || true)"
@@ -44,7 +48,6 @@ except Exception: print("")')"
 [ -n "$DEST" ] || { say "BenOS has no backup destination; nothing to mirror"; exit 0; }
 [ -d "$DEST" ] || { say "backup destination $DEST isn't connected; skipping"; exit 0; }
 
-TARGET="$REMOTE/$(basename "$DEST")"
 # restic's repository files never change once written, so they go up with
 # --immutable. owner.json beside each repository is BenOS's small, mutable note
 # about the repository (who owns it, its last backup); it is copied normally,
@@ -53,26 +56,39 @@ FILTER=(--exclude "**/locks/**" --exclude ".DS_Store" --exclude "**/owner.json")
 
 # Files BenOS writes while this runs go up next time; the check skips them.
 START="$(date '+%Y-%m-%d %H:%M:%S')"
-if [ "${1:-}" != "--check" ]; then
-  say "copying $DEST -> $TARGET"
-  if ! rclone copy "$DEST" "$TARGET" "${FILTER[@]}" --immutable --fast-list \
-      --transfers 8 --checkers 16 --stats 5m --stats-one-line --log-level NOTICE; then
-    say "error: the copy failed"
-    notify "BenOS offsite backup failed" "The copy to $REMOTE didn't finish. See ~/Library/Logs/benos-offsite.log."
-    exit 1
+failed=0
+for remote in $REMOTES; do
+  TARGET="$remote/$(basename "$DEST")"
+  if [ "${1:-}" != "--check" ]; then
+    say "copying $DEST -> $TARGET"
+    # Google Drive takes at most 750 GB a day; stopping at the limit (exit 7)
+    # just means the rest goes up on the next night's run.
+    rclone copy "$DEST" "$TARGET" "${FILTER[@]}" --immutable --fast-list \
+      --drive-stop-on-upload-limit \
+      --transfers 8 --checkers 16 --stats 5m --stats-one-line --log-level NOTICE
+    rc=$?
+    if [ "$rc" = 7 ] && [ "${remote#gdrive}" != "$remote" ]; then
+      say "$remote: Google's daily upload limit reached; the rest goes up tomorrow"
+      continue
+    elif [ "$rc" != 0 ]; then
+      say "error: the copy to $remote failed"
+      notify "BenOS offsite backup failed" "The copy to $remote didn't finish. See ~/Library/Logs/benos-offsite.log."
+      failed=1; continue
+    fi
+    if ! rclone copy "$DEST" "$TARGET" --include "**/owner.json" --fast-list --log-level NOTICE; then
+      say "error: copying owner.json to $remote failed"
+      notify "BenOS offsite backup failed" "Copying owner.json to $remote failed. See ~/Library/Logs/benos-offsite.log."
+      failed=1; continue
+    fi
   fi
-  if ! rclone copy "$DEST" "$TARGET" --include "**/owner.json" --fast-list --log-level NOTICE; then
-    say "error: copying owner.json failed"
-    notify "BenOS offsite backup failed" "Copying owner.json to $REMOTE failed. See ~/Library/Logs/benos-offsite.log."
-    exit 1
-  fi
-fi
 
-say "verifying every file's hash against $TARGET"
-if rclone check "$DEST" "$TARGET" "${FILTER[@]}" --min-age "$START" --one-way --fast-list --log-level NOTICE; then
-  say "ok: the cloud copy matches"
-else
-  say "error: the cloud copy doesn't match"
-  notify "BenOS offsite backup check failed" "Some files in $REMOTE don't match. See ~/Library/Logs/benos-offsite.log."
-  exit 1
-fi
+  say "verifying every file's hash against $TARGET"
+  if rclone check "$DEST" "$TARGET" "${FILTER[@]}" --min-age "$START" --one-way --fast-list --log-level NOTICE; then
+    say "ok: the copy on $remote matches"
+  else
+    say "error: the copy on $remote doesn't match"
+    notify "BenOS offsite backup check failed" "Some files on $remote don't match. See ~/Library/Logs/benos-offsite.log."
+    failed=1
+  fi
+done
+exit "$failed"

@@ -261,7 +261,7 @@ update, it notifies once per version. The 4am run (after the 3am brew run)
 installs a waiting update, unless `AUTO_INSTALL=0` is in
 `~/.config/benos-autoupdate.conf`; then it waits for
 `benos-autoupdate --install`. Installing quits the app, stops the engine,
-takes an APFS-clone snapshot in `~/benos-snapshots/`, reopens the app and makes
+takes an APFS-clone snapshot in `~/Backups/BenOS/snapshots/`, reopens the app and makes
 sure the engine is back on the new version. Every run prunes snapshots: it keeps
 the newest 2 and deletes any older than 30 days (a clone costs only what the
 library has changed since, so old ones grow). Change either in
@@ -274,13 +274,16 @@ machine without BenOS. Log: `~/Library/Logs/benos-autoupdate.log`.
 ## Offsite BenOS backups
 
 `benos-offsite` runs at 3:30am (launchd). It copies BenOS's backup repository,
-already encrypted on the Mac, to an rclone remote and then checks every file's
-hash against it. It uses `rclone copy --immutable`, so it never deletes or
+already encrypted on the Mac, to each rclone remote listed and then checks every
+file's hash against it. It uses `rclone copy --immutable`, so it never deletes or
 overwrites anything remotely. Pair it with a no-delete application key and
 Object Lock on the bucket. A Mac takes part only if it has
 `~/.config/benos-offsite.conf` (never committed), e.g.
-`REMOTE=b2benos:almaer-benos-backup`; the rclone remote itself lives in
-rclone's own config. `benos-offsite --check` only verifies. Log:
+`REMOTES="b2benos:almaer-benos-backup gdrive:Backups/BenOS"` (the older
+single `REMOTE=` still works); the rclone remotes themselves live in rclone's
+own config. B2 is the copy nothing on the Mac can damage; Google Drive is a
+second copy and stops at Google's 750 GB/day upload limit, picking up the rest
+the next night. `benos-offsite --check` only verifies. Log:
 `~/Library/Logs/benos-offsite.log`.
 
 

@@ -19,7 +19,7 @@
 #   4. notifies once per version when one is downloaded and waiting, so it can
 #      be installed by hand (`benos-autoupdate --install`).
 #
-# Snapshots live in ~/benos-snapshots/<date>-<from>-to-<to>, and every run
+# Snapshots live in ~/Backups/BenOS/snapshots/<date>-<from>-to-<to>, and every run
 # prunes them: keep the newest KEEP (default 2), and delete any older than DAYS
 # (default 30). A clone costs only the space the library has since changed, so
 # an old one grows; these bound it. Set either in ~/.config/benos-autoupdate.conf
@@ -38,7 +38,7 @@ BENOS="$(command -v benos || true)"
 [ -n "$BENOS" ] && [ -x "$BENOS" ] || { echo "benos-autoupdate: no BenOS here, nothing to do"; exit 0; }
 
 DATA_DIR="${BENOS_DATA_DIR:-$HOME/benos}"
-SNAPSHOTS="$HOME/benos-snapshots"
+SNAPSHOTS="$HOME/Backups/BenOS/snapshots"
 KEEP=2
 DAYS=30
 AUTO_INSTALL=1
