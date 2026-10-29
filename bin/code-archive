@@ -163,8 +163,8 @@ def secret_content(full):
 
 files, secrets, ignored, repos, skipped, broken = [], set(), [], [], [], []
 
-def keep(rel, full):
-    if os.path.basename(rel) in JUNK:
+def keep(rel, full, tracked=False):
+    if os.path.basename(rel) in JUNK and not tracked:   # a committed .DS_Store stays
         return
     if '\n' in rel or '\r' in rel:
         skipped.append(rel.replace('\n', '?').replace('\r', '?'))
@@ -261,7 +261,7 @@ def list_git(repo, prefix):
             if os.path.lexists(os.path.join(full, '.git')) and not is_worktree(full):
                 list_git(full, prefix + p + '/')   # submodule
             continue
-        keep(prefix + p, full)
+        keep(prefix + p, full, tracked=True)
     for p in zlist(repo, '--others', '--exclude-standard'):
         full = os.path.join(repo, p.rstrip('/'))
         if p.endswith('/'):                          # an untracked nested repo
@@ -796,10 +796,11 @@ for f in json.load(open(sys.argv[1])).get("executables", []):
   # Repositories, outermost first: path, head, bundle location, bundle file, remotes.
   "$PY" -I -c 'import json,sys
 for r in sorted(json.load(open(sys.argv[1]))["repos"], key=lambda r: (r["path"] != ".", r["path"].count("/"))):
-    print("\t".join([r["path"], r["head"], r["bundle"] or "", r["bundle_file"] or "",
+    print("\x1f".join([r["path"], r["head"], r["bundle"] or "", r["bundle_file"] or "",
                      " ".join(x["name"] + "=" + x["url"] for x in r["remotes"])]))' "$RUN/manifest.json" >"$RUN/repos.tsv"
   local sub head where bfile remotes repo r
-  while IFS=$'\t' read -r sub head where bfile remotes; do
+  # \x1f, not a tab: read collapses runs of tabs, which would shift empty fields.
+  while IFS=$'\x1f' read -r sub head where bfile remotes; do
     repo="$to"; [ "$sub" = "." ] || repo="$to/$sub"
     mkdir -p "$repo"; git -C "$repo" init -q || { say "  $sub: git init failed"; continue; }
     for r in $remotes; do git -C "$repo" remote add "${r%%=*}" "${r#*=}" 2>/dev/null; done
