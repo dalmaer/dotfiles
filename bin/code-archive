@@ -414,8 +414,12 @@ def w(fn, lines):
         for l in lines:
             f.write(l + '\n')
 
-w('plain.lst', plain)
-w('secret.lst', secret)
+# rclone --links carries a symlink as "<name>.rclonelink", and --files-from
+# has to name it that way or the link is silently left out.
+def rl(rels):
+    return [r + '.rclonelink' if os.path.islink(os.path.join(src, r)) else r for r in rels]
+w('plain.lst', rl(plain))
+w('secret.lst', rl(secret))
 w('ignored.lst', sorted(set(ignored)))
 w('bundles.tsv', ['\t'.join([r['path'], r['refs_hash'], r['bundle'], r['bundle_file'], r['reason'], r['gitdir']])
                   for r in repos if r['needs_bundle']])
