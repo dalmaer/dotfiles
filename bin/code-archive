@@ -1,0 +1,817 @@
+#!/usr/bin/env bash
+# code-archive -- keep a plain-file copy of every code project on Google Drive,
+# with history only where GitHub doesn't already have it.
+#
+# Meant to run nightly at 02:30 by launchd (launchd/com.dion.code-archive.plist,
+# not installed until asked for). Two sources, two tiers:
+#
+#   current  every project directly under ~/code
+#   legacy   ~/Backups/Dropbox/SourceControl/<Group>/<project> (old Dropbox
+#            export, old employer code included; a Group that is itself one
+#            checkout is one project)
+#
+# and one layout on Drive:
+#
+#   gdrive:Code/_index.csv              one row per project, never shrinks
+#   gdrive:Code/<tier>/<project>/       the working files
+#   gdrive:Code/<tier>/_history/        <project>.bundle, when history is needed
+#   gdrive:Code/<tier>/_meta/           <project>.json, what `fetch` rebuilds from
+#   gdrive-secrets:Code/<tier>/...      secret files, encrypted (rclone crypt)
+#
+# For each project:
+#
+#   * the file list is what git would keep: `git ls-files -co --exclude-standard`
+#     in a repository (untracked node_modules, dist, ... left out too), and for
+#     anything else every file except node_modules, .venv, venv, __pycache__,
+#     dist, build, target, .next, .cache, .DS_Store and VCS metadata. .git itself
+#     is never uploaded. Repositories nested inside a project are listed the
+#     same way;
+#   * secret files -- by name (.env, .env.* but .env.example/.sample, *.pem,
+#     *.key, id_rsa*, credentials*.json, *.p12, ...), by content (private key
+#     blocks, AWS/GitHub/Slack/Anthropic/OpenAI/Stripe/Google keys, .npmrc and
+#     .pypirc with tokens) -- go ONLY to the encrypted remote. A gitignored
+#     secret (.env is always ignored) is still archived there, so a project
+#     can be rebuilt from Drive; everything else gitignored stays local;
+#   * history: a `git bundle --all` is uploaded only when the remotes don't
+#     already hold everything -- no remote, only a local-path remote, remote
+#     unreachable, a commit/tag not on any remote (checked with `git ls-remote`,
+#     never a fetch), or a stash. A repository whose history ever held a
+#     secret-named file has its bundle encrypted. Bundles are rebuilt only when
+#     the repository's refs change;
+#   * uploads are `rclone copy --files-from-raw`, then `rclone check` (MD5) or
+#     `rclone cryptcheck`, so a re-run uploads only what changed. Nothing on
+#     Drive is ever deleted, and nothing local is changed: no fetch, no commit,
+#     no index refresh.
+#
+# Skipped: linked worktrees (~/code/*-worktree style; their commits are in the
+# main repository's bundle), symlinks, BenOS libraries, and anything in SKIP.
+#
+#   code-archive [--dry-run]               archive every project
+#   code-archive park <project> [--dry-run]
+#                                          archive one ~/code project, verify it,
+#                                          say whether it's safe to remove (never
+#                                          removes anything itself)
+#   code-archive fetch <project> [--to DIR]
+#                                          restore into ~/code/<project> (or DIR):
+#                                          files, secrets, then .git from the
+#                                          bundle or a clone of the remote
+#   code-archive list                      print the index
+#
+# <project> is a ~/code name, or tier/name (legacy/Personal/16ate).
+#
+# Settings in ~/.config/code-archive.conf (optional): CODE, LEGACY, REMOTE,
+# SECRET_REMOTE, TIERS ("current legacy"), SKIP (space-separated project
+# names, e.g. "kev legacy/ThirdParty/socket.io"), TRANSFERS, TPSLIMIT.
+# Log: ~/Library/Logs/drive-archive/code-<date>.log
+
+set -uo pipefail
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+CODE="$HOME/code"
+LEGACY="$HOME/Backups/Dropbox/SourceControl"
+REMOTE="gdrive:Code"
+SECRET_REMOTE="gdrive-secrets:Code"
+TIERS="current legacy"
+SKIP=""
+TRANSFERS=8
+TPSLIMIT=10
+# shellcheck disable=SC1091
+[ -r "$HOME/.config/code-archive.conf" ] && . "$HOME/.config/code-archive.conf"
+case "$TRANSFERS" in ''|*[!0-9]*) TRANSFERS=8 ;; esac
+case "$TPSLIMIT" in ''|*[!0-9]*) TPSLIMIT=10 ;; esac
+
+LOG_DIR="$HOME/Library/Logs/drive-archive"
+LOG="$LOG_DIR/code-$(date +%Y%m%d).log"
+STATE="$HOME/.local/state/code-archive"
+PY=/usr/bin/python3
+export GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0
+export GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"
+RC=(rclone --transfers "$TRANSFERS" --checkers 16 --tpslimit "$TPSLIMIT" --links --retries 5 --low-level-retries 20)
+
+say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+die() { say "error: $*"; exit 1; }
+notify() {
+  /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true
+}
+usage() { sed -n '/^#   code-archive \[/,/^# <project>/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# ---------------------------------------------------------------- planning --
+# plan <mode tree|loose> <src> <outdir> <tier> <name>: list a project's files,
+# sort secrets out, and decide on history. Writes to <outdir>: plain.lst,
+# secret.lst (paths relative to <src>, one per line, for --files-from-raw),
+# bundles.tsv (repo subpath, refs hash, plain|secret, bundle path), ignored.lst,
+# manifest.json, row.json and summary.env (shell-quoted counts). Read-only.
+read -r -d '' PLAN_PY <<'PY'
+import fnmatch, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+
+mode, src, out, tier, name = sys.argv[1:6]
+HEAVY = {'node_modules', '.venv', 'venv', '__pycache__', 'dist', 'build',
+         'target', '.next', '.cache'}
+VCS = {'.git', '.svn', 'CVS', '.hg', '.bzr'}
+JUNK = {'.DS_Store'}
+ENV_OK = {'.env.example', '.env.sample'}
+NAMES = ['*.pem', '*.key', '*.p12', '*.pfx', '*.ppk', '*.jks', '*.keystore',
+         'id_rsa*', 'id_dsa*', 'id_ecdsa*', 'id_ed25519*', 'credentials*.json',
+         'client_secret*.json', 'service-account*.json', '.netrc', '.pgpass',
+         '.git-credentials', '.htpasswd', '.htpassword', 'secrets.env',
+         '*.kdbx', '*.keychain', '*.keychain-db', 'password.doc',
+         'passwords.doc', 'passwordtracker.zip', 'custpassword*']
+RC_FILES = {'.npmrc', '.pypirc'}
+CONTENT = re.compile(
+    rb'-----BEGIN [A-Z ]*PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b'
+    rb'|\bgh[pousr]_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{50,}'
+    rb'|\bxox[abprs]-[0-9]{6,}-[A-Za-z0-9-]{10,}|\bsk-ant-[A-Za-z0-9_-]{20,}'
+    rb'|\bsk-proj-[A-Za-z0-9_-]{40,}|\bsk-[A-Za-z0-9]{40,}\b'
+    rb'|\b[rs]k_live_[A-Za-z0-9]{20,}|\bAIza[0-9A-Za-z_-]{35}')
+RC_TOKEN = re.compile(rb'(?im)^[^#;\n]*(_authtoken|_auth|password|token)\s*[=:]\s*\S')
+ENV = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_OPTIONAL_LOCKS='0', LC_ALL='C',
+           GIT_SSH_COMMAND='ssh -oBatchMode=yes -oConnectTimeout=10')
+
+REPAIRED = {}   # repo -> a copy of its .git that git can open (see repair)
+
+def git(repo, *args, inp=None, timeout=900):
+    pre = ['--git-dir', REPAIRED[repo], '--work-tree', repo] if repo in REPAIRED else []
+    try:
+        p = subprocess.run(['git'] + pre + list(args), input=inp, cwd=repo,
+                           capture_output=True, env=ENV, timeout=timeout)
+        return p.returncode, p.stdout
+    except subprocess.TimeoutExpired:
+        return 124, b''
+
+def secret_name(rel):
+    b = os.path.basename(rel).lower()
+    if b == '.env' or (b.startswith('.env.') and b not in ENV_OK):
+        return True
+    if rel.lower().endswith('.aws/credentials') or '.agilekeychain/' in rel.lower():
+        return True
+    return any(fnmatch.fnmatchcase(b, p) for p in NAMES)
+
+def secret_content(full):
+    try:
+        st = os.lstat(full)
+        if not os.path.isfile(full) or os.path.islink(full) or not 0 < st.st_size <= 2 << 20:
+            return False
+        with open(full, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return False
+    if os.path.basename(full).lower() in RC_FILES:
+        return bool(RC_TOKEN.search(data))
+    if b'\0' in data[:8192]:
+        return False
+    return bool(CONTENT.search(data))
+
+files, secrets, ignored, repos, skipped, broken = [], set(), [], [], [], []
+
+def keep(rel, full):
+    if os.path.basename(rel) in JUNK:
+        return
+    if '\n' in rel or '\r' in rel:
+        skipped.append(rel.replace('\n', '?').replace('\r', '?'))
+        return
+    if not (os.path.islink(full) or os.path.isfile(full)):
+        return
+    files.append(rel)
+
+def is_worktree(d):
+    g = os.path.join(d, '.git')
+    if not os.path.isfile(g):
+        return False
+    try:
+        return '/worktrees/' in open(g).read()
+    except OSError:
+        return False
+
+def walk_plain(root, prefix, secrets_only=False):
+    for dirpath, dirs, fnames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        rel_dir = '' if rel_dir == '.' else rel_dir + '/'
+        for d in list(dirs):
+            full = os.path.join(dirpath, d)
+            if os.path.islink(full):
+                dirs.remove(d)
+                if not secrets_only:
+                    keep(prefix + rel_dir + d, full)
+            elif d in HEAVY or d in VCS:
+                dirs.remove(d)
+            elif os.path.lexists(os.path.join(full, '.git')):
+                dirs.remove(d)
+                if not secrets_only and not is_worktree(full):
+                    list_git(full, prefix + rel_dir + d + '/')
+        for f in fnames:
+            rel = prefix + rel_dir + f
+            if secrets_only:
+                if secret_name(rel):
+                    keep(rel, os.path.join(dirpath, f))
+            else:
+                keep(rel, os.path.join(dirpath, f))
+
+def zlist(repo, *args):
+    rc, o = git(repo, 'ls-files', '-z', *args)
+    if rc != 0:
+        raise RuntimeError('git ls-files failed in ' + repo)
+    return [p for p in o.decode('utf-8', 'surrogateescape').split('\0') if p]
+
+# The Dropbox export kept .git/objects, refs and index but dropped .git/HEAD
+# (and empty directories), so git doesn't see a repository. Work from a copy
+# with HEAD put back; the original is never written to.
+def repair(repo):
+    gd = os.path.join(repo, '.git')
+    if not os.path.isdir(gd) or os.path.exists(os.path.join(gd, 'HEAD')) \
+            or not os.path.isdir(os.path.join(gd, 'objects')):
+        return False
+    dst = os.path.join(out, 'repaired', '%d.git' % len(REPAIRED))
+    try:
+        shutil.copytree(gd, dst, symlinks=True)
+    except (OSError, shutil.Error):
+        shutil.rmtree(dst, ignore_errors=True)
+        return False
+    for d in ('refs/heads', 'refs/tags', 'objects/info', 'objects/pack'):
+        os.makedirs(os.path.join(dst, d), exist_ok=True)
+    heads = []
+    for dp, _, fns in os.walk(os.path.join(dst, 'refs', 'heads')):
+        heads += [os.path.relpath(os.path.join(dp, f), os.path.join(dst, 'refs', 'heads')) for f in fns]
+    try:
+        heads += [l.split()[1][11:] for l in open(os.path.join(dst, 'packed-refs'))
+                  if len(l.split()) == 2 and l.split()[1].startswith('refs/heads/')]
+    except OSError:
+        pass
+    head = next((b for b in ('master', 'main') if b in heads), heads[0] if heads else 'master')
+    with open(os.path.join(dst, 'HEAD'), 'w') as f:
+        f.write('ref: refs/heads/%s\n' % head)
+    REPAIRED[repo] = dst
+    if git(repo, 'rev-parse', '--git-dir')[0] != 0:
+        del REPAIRED[repo]
+        shutil.rmtree(dst, ignore_errors=True)
+        return False
+    return True
+
+def list_git(repo, prefix):
+    repair(repo)
+    try:
+        tracked = zlist(repo, '--cached')
+    except RuntimeError:
+        print('warning: git ls-files failed in %s; listing it as plain files' % repo, file=sys.stderr)
+        broken.append(prefix or '.')
+        walk_plain(repo, prefix)
+        return
+    for p in tracked:
+        full = os.path.join(repo, p)
+        if os.path.isdir(full) and not os.path.islink(full):
+            if os.path.lexists(os.path.join(full, '.git')) and not is_worktree(full):
+                list_git(full, prefix + p + '/')   # submodule
+            continue
+        keep(prefix + p, full)
+    for p in zlist(repo, '--others', '--exclude-standard'):
+        full = os.path.join(repo, p.rstrip('/'))
+        if p.endswith('/'):                          # an untracked nested repo
+            if not is_worktree(full):
+                list_git(full, prefix + p)
+            continue
+        if any(c in HEAVY for c in p.split('/')[:-1]):
+            continue
+        keep(prefix + p, full)
+    # Gitignored: only secrets are archived; the rest is listed for `park`.
+    for p in zlist(repo, '--others', '--ignored', '--exclude-standard', '--directory'):
+        full = os.path.join(repo, p.rstrip('/'))
+        if p.endswith('/'):
+            base = p.rstrip('/').split('/')[-1]
+            if base in HEAVY or '.claude/worktrees' in p or base in VCS:
+                ignored.append(prefix + p)
+                continue
+            if os.path.lexists(os.path.join(full, '.git')):
+                ignored.append(prefix + p)
+                continue
+            before = len(files)
+            walk_plain(full, prefix + p, secrets_only=True)
+            ignored.append(prefix + p)
+            for rel in files[before:]:
+                secrets.add(rel)
+        elif secret_name(p) and os.path.basename(p) not in JUNK:
+            keep(prefix + p, full)
+            secrets.add(prefix + p)
+        else:
+            ignored.append(prefix + p)
+    repos.append(repo_info(repo, prefix.rstrip('/') or '.'))
+
+def clean_url(u):
+    return re.sub(r'^(https?://)[^/@]+@', r'\1', u)
+
+def local_url(u):
+    return u.startswith(('/', '.', 'file://', '~')) or ':' not in u
+
+def repo_info(repo, sub):
+    def out1(*a):
+        rc, o = git(repo, *a)
+        return o.decode('utf-8', 'replace').strip() if rc == 0 else ''
+    head = out1('symbolic-ref', '-q', '--short', 'HEAD')
+    has_commits = bool(out1('rev-parse', '-q', '--verify', 'HEAD^{commit}')) or \
+        bool(out1('for-each-ref', '--count=1', 'refs/heads'))
+    if not head:
+        head = 'detached:' + out1('rev-parse', '-q', '--verify', 'HEAD')
+    default = out1('symbolic-ref', '-q', '--short', 'refs/remotes/origin/HEAD')
+    default = default.split('/', 1)[1] if '/' in default else ''
+    if not default:
+        for b in ('main', 'master'):
+            if out1('rev-parse', '-q', '--verify', 'refs/heads/' + b):
+                default = b
+                break
+    default = default or (head if not head.startswith('detached:') else '')
+    last = out1('log', '--all', '-1', '--format=%cI') if has_commits else ''
+    remotes = []
+    for r in out1('remote').split():
+        remotes.append({'name': r, 'url': out1('remote', 'get-url', r)})
+    refs = out1('for-each-ref', '--format=%(refname) %(objectname)')
+    refs_hash = hashlib.sha1(refs.encode()).hexdigest()
+    reason = ''
+    if has_commits:
+        offsite = [r for r in remotes if r['url'] and not local_url(r['url'])]
+        stash = bool(out1('rev-parse', '-q', '--verify', 'refs/stash'))
+        if not remotes:
+            reason = 'no remote'
+        elif not offsite:
+            reason = 'only a local-path remote'
+        else:
+            shas, reached = set(), 0
+            for r in offsite:
+                rc, o = git(repo, 'ls-remote', r['name'], timeout=60)
+                if rc == 0:
+                    reached += 1
+                    shas.update(l.split('\t')[0] for l in o.decode('utf-8', 'replace').splitlines() if l)
+            if not reached:
+                reason = 'remote unreachable'
+            else:
+                rc, o = git(repo, 'cat-file', '--batch-check=%(objectname)',
+                            inp='\n'.join(sorted(shas)).encode() + b'\n')
+                have = [l for l in o.decode().splitlines() if l and 'missing' not in l]
+                spec = '\n'.join(['--branches', '--tags'] + ['^' + s for s in have]) + '\n'
+                rc, o = git(repo, 'rev-list', '--count', '--stdin', inp=spec.encode())
+                n = int(o.strip() or 0) if rc == 0 else -1
+                if n < 0:
+                    reason = 'could not compare with remote'
+                elif n:
+                    reason = '%d commit%s not on remote' % (n, '' if n == 1 else 's')
+                elif stash:
+                    reason = 'stash'
+    secret_hist = False
+    if reason:
+        rc, o = git(repo, 'log', '--all', '--format=', '--name-only', '-z')
+        secret_hist = any(secret_name(p) or os.path.basename(p).lower() in RC_FILES
+                          for p in set(o.decode('utf-8', 'replace').replace('\n', '\0').split('\0')) if p)
+    dirty_wt = []
+    if sub == '.':
+        rc, o = git(repo, 'worktree', 'list', '--porcelain')
+        wts = [l[9:] for l in o.decode('utf-8', 'replace').splitlines() if l.startswith('worktree ')][1:]
+        for wt in wts:
+            if os.path.isdir(wt):
+                rc2, o2 = git(wt, 'status', '--porcelain')
+                if o2.strip():
+                    dirty_wt.append(wt)
+    if reason and repo in REPAIRED:
+        reason += '; export lacked .git/HEAD, bundled from a repaired copy'
+    rel = '_history/%s%s.bundle' % (name, '' if sub == '.' else '/' + sub)
+    return {'path': sub, 'head': head, 'default_branch': default, 'last_commit': last,
+            'remotes': [{'name': r['name'], 'url': clean_url(r['url'])} for r in remotes],
+            'needs_bundle': bool(reason), 'reason': reason, 'refs_hash': refs_hash,
+            'bundle': ('secret' if secret_hist else 'plain') if reason else None,
+            'bundle_file': rel if reason else None, 'dirty_worktrees': dirty_wt,
+            'gitdir': REPAIRED.get(repo, '')}
+
+vcs = 'none'
+if mode == 'loose':
+    for f in sorted(os.listdir(src)):
+        full = os.path.join(src, f)
+        if not os.path.isdir(full) or os.path.islink(full):
+            keep(f, full)
+elif os.path.isdir(os.path.join(src, '.git')):
+    vcs = 'git'
+    list_git(src, '')
+else:
+    if os.path.isdir(os.path.join(src, '.svn')):
+        vcs = 'svn'
+    walk_plain(src, '')
+    if repos:
+        vcs = vcs + '+nested-git' if vcs != 'none' else 'nested-git'
+
+files = sorted(set(files))
+for rel in files:
+    if rel not in secrets and (secret_name(rel) or secret_content(os.path.join(src, rel))):
+        secrets.add(rel)
+plain = [f for f in files if f not in secrets]
+secret = sorted(secrets)
+
+def size(rels):
+    t = 0
+    for r in rels:
+        try:
+            t += os.lstat(os.path.join(src, r)).st_size
+        except OSError:
+            pass
+    return t
+
+def w(fn, lines):
+    with open(os.path.join(out, fn), 'w', encoding='utf-8', errors='surrogateescape') as f:
+        for l in lines:
+            f.write(l + '\n')
+
+w('plain.lst', plain)
+w('secret.lst', secret)
+w('ignored.lst', sorted(set(ignored)))
+w('bundles.tsv', ['\t'.join([r['path'], r['refs_hash'], r['bundle'], r['bundle_file'], r['reason'], r['gitdir']])
+                  for r in repos if r['needs_bundle']])
+w('skipped.lst', skipped)
+root = next((r for r in repos if r['path'] == '.'), None)
+bundled = [r for r in repos if r['needs_bundle']]
+manifest = {'name': name, 'tier': tier, 'source_path': src, 'vcs': vcs,
+            'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'files': len(plain), 'secret_files': len(secret),
+            'repos': [{k: r[k] for k in ('path', 'head', 'default_branch', 'remotes',
+                                         'bundle', 'bundle_file')} for r in repos]}
+json.dump(manifest, open(os.path.join(out, 'manifest.json'), 'w'), indent=1)
+row = {'name': name, 'tier': tier, 'vcs': vcs, 'source_path': src,
+       'remote_urls': ' '.join(sorted({x['url'] for x in root['remotes']})) if root else '',
+       'default_branch': root['default_branch'] if root else '',
+       'last_commit': max([r['last_commit'] for r in repos if r['last_commit']] or ['']),
+       'all_on_remote': ('yes' if not bundled else 'no') if repos else '',
+       'history_bundle': '; '.join('%s%s (%s%s)' % (
+           r['bundle_file'], '', r['reason'], ', encrypted' if r['bundle'] == 'secret' else '')
+           for r in bundled),
+       'nested_repos': str(len([r for r in repos if r['path'] != '.'])),
+       'files': str(len(plain)), 'size_bytes': str(size(plain)),
+       'secret_files': str(len(secret)), 'secret_bytes': str(size(secret))}
+json.dump(row, open(os.path.join(out, 'row.json'), 'w'), indent=1)
+dirty = root['dirty_worktrees'] if root else []
+with open(os.path.join(out, 'summary.env'), 'w') as f:
+    for k, v in (('FILES', len(plain)), ('BYTES', size(plain)), ('SECRETS', len(secret)),
+                 ('SECRET_BYTES', size(secret)), ('BUNDLES', len(bundled)),
+                 ('VCS', vcs), ('IGNORED', len(set(ignored))), ('SKIPPED', len(skipped)),
+                 ('DIRTY_WORKTREES', ' '.join(dirty)), ('BROKEN', ' '.join(broken))):
+        f.write('%s=%s\n' % (k, shlex.quote(str(v))))
+PY
+
+# merge_index <old.csv or ""> <run dir> <new.csv>: the previous index, with a row
+# replaced for every project archived this run. Rows for projects no longer on
+# disk (parked, deleted) stay.
+read -r -d '' INDEX_PY <<'PY'
+import csv, glob, json, os, sys
+old, run, new = sys.argv[1:4]
+COLS = ['name', 'tier', 'vcs', 'source_path', 'remote_urls', 'default_branch',
+        'last_commit', 'all_on_remote', 'history_bundle', 'nested_repos', 'files',
+        'size_bytes', 'secret_files', 'secret_bytes', 'archived_at', 'status']
+rows = {}
+if old and os.path.exists(old):
+    for r in csv.DictReader(open(old, newline='', encoding='utf-8')):
+        rows[(r['tier'], r['name'])] = r
+for d in glob.glob(os.path.join(run, '*', '*')):
+    try:
+        r = json.load(open(os.path.join(d, 'row.json')))
+        status = open(os.path.join(d, 'status')).read().strip()
+    except OSError:
+        continue
+    key = (r['tier'], r['name'])
+    if status.startswith('ok'):
+        r['archived_at'] = status.split(' ', 1)[1]
+        r['status'] = 'ok'
+        rows[key] = r
+    elif key in rows:
+        rows[key]['status'] = status
+    else:
+        r['archived_at'] = ''
+        r['status'] = status
+        rows[key] = r
+with open(new, 'w', newline='', encoding='utf-8') as f:
+    w = csv.DictWriter(f, fieldnames=COLS, extrasaction='ignore')
+    w.writeheader()
+    for k in sorted(rows, key=lambda k: (k[0] != 'current', k[1].lower())):
+        w.writerow({c: rows[k].get(c, '') for c in COLS})
+PY
+
+# -------------------------------------------------------------- projects --
+# Emits "tier<TAB>name<TAB>path<TAB>mode" for every project, and logs skips.
+skip_listed() { local s; for s in $SKIP; do [ "$s" = "$1" ] || [ "$s" = "$2/$1" ] && return 0; done; return 1; }
+benos_library() { [ -d "$1/blobs" ] && [ -d "$1/collections" ] && [ -d "$1/connectors" ]; }
+
+projects() {
+  local tier d g c name loose
+  for tier in $TIERS; do
+    case "$tier" in
+      current)
+        [ -d "$CODE" ] || { say "no $CODE, current tier skipped" >&2; continue; }
+        for d in "$CODE"/*/; do
+          d="${d%/}"; name=$(basename "$d")
+          if [ -L "$d" ]; then say "skip current/$name: symlink" >&2
+          elif [ -f "$d/.git" ]; then say "skip current/$name: linked worktree" >&2
+          elif [ "$(cd "$d" && pwd -P)" = "$(cd "$HOME/benos" 2>/dev/null && pwd -P)" ] || benos_library "$d"; then
+            say "skip current/$name: BenOS library" >&2
+          elif skip_listed "$name" current; then say "skip current/$name: in SKIP" >&2
+          else printf 'current\t%s\t%s\ttree\n' "$name" "$d"
+          fi
+        done ;;
+      legacy)
+        [ -d "$LEGACY" ] || { say "no $LEGACY, legacy tier skipped" >&2; continue; }
+        for g in "$LEGACY"/*/; do
+          g="${g%/}"; name=$(basename "$g")
+          if [ -d "$g/.git" ] || [ -d "$g/.svn" ]; then
+            skip_listed "$name" legacy || printf 'legacy\t%s\t%s\ttree\n' "$name" "$g"
+            continue
+          fi
+          loose=$(/usr/bin/find "$g" -mindepth 1 -maxdepth 1 ! -type d ! -name .DS_Store | head -1)
+          [ -n "$loose" ] && ! skip_listed "$name/_loose" legacy && printf 'legacy\t%s\t%s\tloose\n' "$name/_loose" "$g"
+          for c in "$g"/*/; do
+            c="${c%/}"
+            [ -L "$c" ] && { say "skip legacy/$name/$(basename "$c"): symlink" >&2; continue; }
+            skip_listed "$name/$(basename "$c")" legacy && { say "skip legacy/$name/$(basename "$c"): in SKIP" >&2; continue; }
+            printf 'legacy\t%s\t%s\ttree\n' "$name/$(basename "$c")" "$c"
+          done
+        done ;;
+      *) say "unknown tier '$tier' in TIERS" >&2 ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------- upload --
+# put <srcdir> <dest> <listfile> <secret 0|1>: copy the listed files, then prove
+# every one of them is on Drive with the same content.
+put() {
+  local src="$1" dst="$2" lst="$3" secret="$4" out cmp=--checksum
+  [ -s "$lst" ] || return 0
+  # crypt has no hashes in common with local files: size+modtime to copy,
+  # cryptcheck (hash of the decrypted content) to verify.
+  [ "$secret" = 1 ] && cmp=
+  if [ "$DRY" = 1 ]; then
+    out=$("${RC[@]}" copy "$src" "$dst" --files-from-raw "$lst" $cmp --dry-run 2>&1)
+    pending=$((pending + $(printf '%s\n' "$out" | grep -c 'Skipped copy as --dry-run')))
+    printf '%s\n' "$out" | grep -E 'ERROR|Failed' | head -5
+    return 0
+  fi
+  out=$("${RC[@]}" copy "$src" "$dst" --files-from-raw "$lst" $cmp -v --stats 0 2>&1)
+  local rc=$?
+  printf '%s\n' "$out" | grep -vE 'INFO  : There was nothing to transfer' >>"$RCLOG"
+  copied=$((copied + $(printf '%s\n' "$out" | grep -c ': Copied (')))
+  [ "$rc" = 0 ] || { printf '%s\n' "$out" | grep -E 'ERROR' | tail -3; return 1; }
+  if [ "$secret" = 1 ]; then
+    out=$("${RC[@]}" cryptcheck "$src" "$dst" --files-from-raw "$lst" --one-way 2>&1)
+  else
+    out=$("${RC[@]}" check "$src" "$dst" --files-from-raw "$lst" --one-way 2>&1)
+  fi
+  rc=$?
+  printf '%s\n' "$out" | grep -E 'ERROR|differences' >>"$RCLOG"
+  [ "$rc" = 0 ] || { printf '%s\n' "$out" | grep -E 'ERROR|differences' | tail -3; return 1; }
+}
+
+# archive <tier> <name> <path> <mode>: everything for one project. Sets $out.
+archive() {
+  local tier="$1" name="$2" src="$3" mode="$4" sub hash where rel why st tmp
+  out="$RUN/$tier/$(printf '%s' "$name" | tr '/' '+')"
+  mkdir -p "$out"
+  if ! "$PY" -I -c "$PLAN_PY" "$mode" "$src" "$out" "$tier" "$name" 2>"$out/plan.err"; then
+    say "$tier/$name: FAILED to list files: $(tail -1 "$out/plan.err")"
+    echo "failed: listing" >"$out/status"; return 1
+  fi
+  local FILES BYTES SECRETS SECRET_BYTES BUNDLES VCS IGNORED SKIPPED DIRTY_WORKTREES BROKEN
+  # shellcheck disable=SC1091
+  . "$out/summary.env"
+  [ -z "$BROKEN" ] || say "  git couldn't read $BROKEN; archived as plain files, no history"
+  t_files=$((t_files + FILES)); t_bytes=$((t_bytes + BYTES)); t_secrets=$((t_secrets + SECRETS))
+  say "$tier/$name: $VCS, $FILES files ($(human "$BYTES")), $SECRETS secret, $BUNDLES bundle(s)"
+  [ "$SKIPPED" = 0 ] || say "  $SKIPPED file(s) with a newline in the name left out: $(tr '\n' ' ' <"$out/skipped.lst")"
+  while IFS= read -r rel; do say "  secret -> encrypted: $rel"; done <"$out/secret.lst"
+  while IFS=$'\t' read -r sub hash where rel why gitdir; do
+    say "  history needed for $sub: $why$([ "$where" = secret ] && echo ' (secret-named file in history: bundle encrypted)')"
+  done <"$out/bundles.tsv"
+
+  local fail=""
+  put "$src" "$REMOTE/$tier/$name" "$out/plain.lst" 0 || fail="files"
+  put "$src" "$SECRET_REMOTE/$tier/$name" "$out/secret.lst" 1 || fail="${fail:+$fail, }secrets"
+
+  while IFS=$'\t' read -r sub hash where rel why gitdir; do
+    [ -n "$rel" ] || continue
+    st="$STATE/bundles/$tier/$rel.refs"
+    if [ -f "$st" ] && [ "$(cat "$st")" = "$hash" ]; then
+      say "  $rel: refs unchanged since last upload"; continue
+    fi
+    [ "$DRY" = 1 ] && { say "  would bundle $sub -> $rel"; pending=$((pending + 1)); continue; }
+    tmp="$RUN/bundle"; rm -rf "$tmp"; mkdir -p "$tmp/$(dirname "$rel")"
+    local repo="$src"; [ "$sub" = "." ] || repo="$src/$sub"
+    local g=(git -C "$repo"); [ -z "$gitdir" ] || g=(git --git-dir="$gitdir")
+    if ! "${g[@]}" bundle create -q "$tmp/$rel" --all 2>>"$out/plan.err" \
+       || ! "${g[@]}" bundle verify -q "$tmp/$rel" >/dev/null 2>&1; then
+      if [ -n "$gitdir" ]; then
+        # A repaired export copy can be missing objects too: files only.
+        say "  $rel: history in the export is incomplete, can't bundle; files archived without it"
+      else
+        say "  $rel: FAILED to bundle"; fail="${fail:+$fail, }bundle $sub"
+      fi
+      continue
+    fi
+    printf '%s\n' "$rel" >"$tmp/list"
+    local dest="$REMOTE/$tier"; local enc=0
+    [ "$where" = secret ] && { dest="$SECRET_REMOTE/$tier"; enc=1; }
+    if put "$tmp" "$dest" "$tmp/list" "$enc"; then
+      mkdir -p "$(dirname "$st")"; printf '%s' "$hash" >"$st"
+      say "  uploaded $rel ($(human "$(stat -f %z "$tmp/$rel")")$([ "$enc" = 1 ] && echo ', encrypted'))"
+      t_bundles=$((t_bundles + 1))
+    else
+      fail="${fail:+$fail, }bundle $sub"
+    fi
+    rm -rf "$tmp"
+  done <"$out/bundles.tsv"
+
+  if [ "$DRY" = 0 ] && [ -z "$fail" ]; then
+    tmp="$RUN/meta"; rm -rf "$tmp"; mkdir -p "$tmp/_meta/$(dirname "$name")"
+    cp "$out/manifest.json" "$tmp/_meta/$name.json"
+    printf '_meta/%s.json\n' "$name" >"$tmp/list"
+    put "$tmp" "$REMOTE/$tier" "$tmp/list" 0 || fail="manifest"
+    rm -rf "$tmp"
+  fi
+  if [ -n "$fail" ]; then
+    say "$tier/$name: FAILED ($fail)"; echo "failed: $fail" >"$out/status"; failures=$((failures + 1)); return 1
+  fi
+  echo "ok $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$out/status"
+}
+
+human() { awk -v b="$1" 'BEGIN{split("B KB MB GB TB",u," "); i=1; while (b>=1024 && i<5) {b/=1024; i++} printf (i==1?"%d %s":"%.1f %s"), b, u[i]}'; }
+
+# write_index: merge this run's rows into gdrive:Code/_index.csv. Fails closed:
+# if the old index can't be read, it is not overwritten.
+write_index() {
+  [ "$DRY" = 1 ] && return 0
+  local old="" tmp="$RUN/index" ls
+  mkdir -p "$tmp"
+  ls=$(rclone lsf "$REMOTE/" --files-only --include /_index.csv 2>&1) || { say "can't read $REMOTE/_index.csv ($ls); index not updated"; return 1; }
+  if [ -n "$ls" ]; then
+    rclone copyto "$REMOTE/_index.csv" "$tmp/old.csv" 2>/dev/null || { say "can't download the index; not updated"; return 1; }
+    old="$tmp/old.csv"
+  fi
+  "$PY" -I -c "$INDEX_PY" "$old" "$RUN" "$tmp/_index.csv" || { say "index merge failed"; return 1; }
+  printf '_index.csv\n' >"$tmp/list"
+  put "$tmp" "$REMOTE" "$tmp/list" 0 || { say "index upload failed"; return 1; }
+  mkdir -p "$STATE"; cp "$tmp/_index.csv" "$STATE/_index.csv"
+  say "index: $(($(wc -l <"$tmp/_index.csv") - 1)) projects in $REMOTE/_index.csv"
+}
+
+lock() {
+  mkdir -p "$STATE"
+  if ! mkdir "$STATE/lock" 2>/dev/null; then
+    local pid; pid=$(cat "$STATE/lock/pid" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then die "already running (pid $pid)"; fi
+    rm -rf "$STATE/lock"; mkdir "$STATE/lock" || die "can't take $STATE/lock"
+  fi
+  echo $$ >"$STATE/lock/pid"
+}
+
+setup_run() {
+  mkdir -p "$LOG_DIR"
+  # A terminal sees the log as it's written; launchd's output goes only to it.
+  if [ -t 1 ]; then exec > >(tee -a "$LOG") 2>&1; else exec >>"$LOG" 2>&1; fi
+  RUN=$(mktemp -d "${TMPDIR:-/tmp}/code-archive.XXXXXX") || die "no temp dir"
+  RCLOG="$LOG_DIR/code-$(date +%Y%m%d)-rclone.log"
+  lock
+  trap 'rm -rf "$RUN" "$STATE/lock"' EXIT
+  command -v rclone >/dev/null || die "rclone not installed"
+  t_files=0; t_bytes=0; t_secrets=0; t_bundles=0; copied=0; pending=0; failures=0
+}
+
+# ------------------------------------------------------------- commands --
+cmd_all() {
+  setup_run
+  say "== code-archive$([ "$DRY" = 1 ] && echo ' --dry-run'): $TIERS"
+  local tier name path mode list tf tb ts n=0
+  list=$(projects) || true
+  for tier in $TIERS; do
+    tf=$t_files; tb=$t_bytes; ts=$t_secrets; n=0
+    while IFS=$'\t' read -r t name path mode; do
+      [ "$t" = "$tier" ] || continue
+      archive "$tier" "$name" "$path" "$mode"; n=$((n + 1))
+    done <<<"$list"
+    say "== $tier: $n projects, $((t_files - tf)) files ($(human $((t_bytes - tb)))), $((t_secrets - ts)) secret files"
+  done
+  write_index || failures=$((failures + 1))
+  if [ "$DRY" = 1 ]; then
+    say "== dry run: $pending file(s)/bundle(s) would be uploaded; nothing changed"
+  else
+    say "== done: $copied file(s) uploaded, $t_bundles bundle(s), $failures failure(s)"
+    [ "$failures" = 0 ] || notify "Code archive" "$failures project(s) failed -- see $LOG"
+  fi
+  [ "$failures" = 0 ]
+}
+
+# find_project <arg> -> "tier<TAB>name<TAB>path<TAB>mode" from local disk.
+find_project() {
+  local arg="$1" tier=current name="$1"
+  case "$arg" in current/*|legacy/*) tier="${arg%%/*}"; name="${arg#*/}" ;; esac
+  TIERS="$tier" projects 2>/dev/null | awk -F'\t' -v n="$name" '$2 == n' | head -1
+}
+
+cmd_park() {
+  local arg="${1:-}"; [ -n "$arg" ] || usage 2
+  local line; line=$(find_project "$arg")
+  [ -n "$line" ] || die "no project '$arg' under $CODE (or it's a worktree / skipped)"
+  setup_run
+  local tier name path mode
+  IFS=$'\t' read -r tier name path mode <<<"$line"
+  say "== code-archive park $tier/$name$([ "$DRY" = 1 ] && echo ' --dry-run')"
+  archive "$tier" "$name" "$path" "$mode"; local ok=$?
+  write_index || ok=1
+  [ "$DRY" = 1 ] && { say "dry run: $pending file(s)/bundle(s) would be uploaded"; return 0; }
+  [ "$ok" = 0 ] || die "$tier/$name did not archive cleanly; keep it"
+  local DIRTY_WORKTREES IGNORED FILES BYTES SECRETS SECRET_BYTES BUNDLES VCS SKIPPED BROKEN
+  # shellcheck disable=SC1091
+  . "$out/summary.env"
+  echo
+  echo "Archived $path -> $REMOTE/$tier/$name ($FILES files, verified)."
+  [ "$SECRETS" = 0 ] || echo "  $SECRETS secret file(s) -> $SECRET_REMOTE/$tier/$name (verified)"
+  [ "$BUNDLES" = 0 ] && [ "$VCS" = git ] && echo "  History: on the remote ($(grep -o '"remote_urls": "[^"]*' "$out/row.json" | cut -d'"' -f4))"
+  [ "$BUNDLES" = 0 ] || echo "  History: $BUNDLES bundle(s) under $REMOTE/$tier/_history"
+  local safe=1
+  if [ -n "$DIRTY_WORKTREES" ]; then
+    safe=0; echo "  NOT SAFE YET: linked worktrees with uncommitted changes (not archived): $DIRTY_WORKTREES"
+  fi
+  if [ "$IGNORED" != 0 ]; then
+    echo "  Gitignored, not archived (regenerable or local-only -- check you don't need them):"
+    sed 's/^/    /' "$out/ignored.lst" | head -15
+    [ "$IGNORED" -le 15 ] || echo "    ... $((IGNORED - 15)) more"
+  fi
+  if [ "$safe" = 1 ]; then
+    echo "Safe to remove locally: rm -rf $path   (code-archive never deletes it; restore with \`code-archive fetch $name\`)"
+  fi
+}
+
+cmd_fetch() {
+  local arg="" to=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --to) to="${2:-}"; shift 2 ;; -*) usage 2 ;; *) arg="$1"; shift ;; esac
+  done
+  [ -n "$arg" ] || usage 2
+  local tier=current name="$arg"
+  case "$arg" in current/*|legacy/*) tier="${arg%%/*}"; name="${arg#*/}" ;; esac
+  [ -n "$to" ] || to="$CODE/$(basename "$name")"
+  if [ -e "$to" ] && [ -n "$(ls -A "$to" 2>/dev/null)" ]; then die "$to exists and isn't empty; pick another with --to"; fi
+  RUN=$(mktemp -d "${TMPDIR:-/tmp}/code-archive.XXXXXX"); trap 'rm -rf "$RUN"' EXIT
+  rclone copyto "$REMOTE/$tier/_meta/$name.json" "$RUN/manifest.json" 2>/dev/null \
+    || die "no archive of $tier/$name on $REMOTE (see \`code-archive list\`)"
+  mkdir -p "$to"
+  say "restoring $tier/$name -> $to"
+  "${RC[@]}" copy "$REMOTE/$tier/$name" "$to" --stats 0 || die "file restore failed"
+  local nsec; nsec=$("$PY" -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["secret_files"])' "$RUN/manifest.json")
+  if [ "$nsec" != 0 ]; then
+    "${RC[@]}" copy "$SECRET_REMOTE/$tier/$name" "$to" --stats 0 || die "secret restore failed"
+    say "  $nsec secret file(s) restored from $SECRET_REMOTE"
+  fi
+  # Repositories, outermost first: path, head, bundle location, bundle file, remotes.
+  "$PY" -I -c 'import json,sys
+for r in sorted(json.load(open(sys.argv[1]))["repos"], key=lambda r: (r["path"] != ".", r["path"].count("/"))):
+    print("\t".join([r["path"], r["head"], r["bundle"] or "", r["bundle_file"] or "",
+                     " ".join(x["name"] + "=" + x["url"] for x in r["remotes"])]))' "$RUN/manifest.json" >"$RUN/repos.tsv"
+  local sub head where bfile remotes repo r
+  while IFS=$'\t' read -r sub head where bfile remotes; do
+    repo="$to"; [ "$sub" = "." ] || repo="$to/$sub"
+    mkdir -p "$repo"; git -C "$repo" init -q || { say "  $sub: git init failed"; continue; }
+    for r in $remotes; do git -C "$repo" remote add "${r%%=*}" "${r#*=}" 2>/dev/null; done
+    if [ -n "$bfile" ]; then
+      local base="$REMOTE/$tier"; [ "$where" = secret ] && base="$SECRET_REMOTE/$tier"
+      rclone copyto "$base/$bfile" "$RUN/h.bundle" || { say "  $sub: bundle download failed"; continue; }
+      git -C "$repo" fetch -q --update-head-ok "$RUN/h.bundle" 'refs/*:refs/*' || { say "  $sub: bundle fetch failed"; continue; }
+      rm -f "$RUN/h.bundle"
+      say "  $sub: history from $bfile"
+    elif [ -n "$remotes" ]; then
+      git -C "$repo" fetch -q --all || { say "  $sub: fetch from remote failed; files restored without history"; continue; }
+      case "$head" in detached:*|'') ;; *)
+        git -C "$repo" show-ref -q --verify "refs/remotes/origin/$head" \
+          && git -C "$repo" update-ref "refs/heads/$head" "refs/remotes/origin/$head" ;;
+      esac
+      git -C "$repo" remote set-head origin --auto >/dev/null 2>&1
+      say "  $sub: history from ${remotes%% *}"
+    else
+      say "  $sub: no history archived"; continue
+    fi
+    case "$head" in
+      detached:*) git -C "$repo" update-ref --no-deref HEAD "${head#detached:}" ;;
+      '') ;;
+      *) git -C "$repo" symbolic-ref HEAD "refs/heads/$head" ;;
+    esac
+    git -C "$repo" reset -q 2>/dev/null
+    say "  $sub: on ${head:-?}, $(git -C "$repo" status --porcelain | wc -l | tr -d ' ') path(s) differ from HEAD (as when archived)"
+  done <"$RUN/repos.tsv"
+  say "restored $tier/$name into $to"
+}
+
+cmd_list() {
+  rclone cat "$REMOTE/_index.csv" 2>/dev/null | "$PY" -I -c 'import csv,sys
+for r in csv.DictReader(sys.stdin):
+    print("%-8s %-45s %-4s %7s files %-6s %s" % (r["tier"], r["name"][:45], r["all_on_remote"] or "-", r["files"], r["status"], r["history_bundle"][:60]))' \
+    || die "can't read $REMOTE/_index.csv"
+}
+
+DRY=0
+args=()
+for a in "$@"; do [ "$a" = "--dry-run" ] && DRY=1 || args+=("$a"); done
+set -- ${args[@]+"${args[@]}"}
+case "${1:-}" in
+  ''|run) cmd_all ;;
+  park) shift; cmd_park "$@" ;;
+  fetch) shift; cmd_fetch "$@" ;;
+  list) cmd_list ;;
+  -h|--help|help) usage 0 ;;
+  *) usage 2 ;;
+esac

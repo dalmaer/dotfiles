@@ -46,6 +46,7 @@ bin/                  everything here is linked into ~/bin
   documents-cleaner   gather screenshots from every Mac, de-duplicate, name by app
   benos-autoupdate    notify when a BenOS update is waiting; install it overnight or on --install
   benos-offsite       mirror BenOS's encrypted backups to cloud storage and verify them
+  code-archive        nightly: plain copy of every project to Google Drive; park/fetch one
   git-tidy            weekly: remove finished agent worktrees and merged branches in ~/code
   ledge-email-sync    keep Gmail stars and Ledge tasks in step, through BenOS (every 10 min)
   nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
@@ -300,3 +301,40 @@ Uncommitted changes are never touched; they're listed in the log and in a
 notification. `git-tidy --dry-run` shows what it would do. Settings:
 `~/.config/git-tidy.conf` (`MIN_AGE`, `ARCHIVE_AFTER`, `SKIP`). Log:
 `~/Library/Logs/git-tidy.log`.
+
+## Code archive
+
+`code-archive` copies every project in `~/code` (tier `current`) and the old
+Dropbox `SourceControl` tree (tier `legacy`) to `gdrive:Code/<tier>/<project>/`
+as plain files: what `git ls-files -co --exclude-standard` lists, or for a
+folder that isn't a repository everything but `node_modules`, `dist`, `build`,
+virtualenvs and caches. `.git` never goes up. Secret files (`.env*` other than
+`.env.example`/`.env.sample`, `*.pem`, `*.key`, `id_rsa*`, `credentials*.json`,
+`*.p12`, `.npmrc`/`.pypirc` holding tokens, and files whose content holds a
+private key or a recognisable API key) go only to the encrypted
+`gdrive-secrets:Code/...`, including gitignored ones, so a project can be
+rebuilt from Drive. History is uploaded as a `git bundle --all`, to
+`gdrive:Code/<tier>/_history/`, only when the remotes don't already have every
+commit, tag and stash (checked with `git ls-remote`, never a fetch); a repository
+whose history ever held a secret-named file gets an encrypted bundle.
+`gdrive:Code/_index.csv` has a row per project (remotes, default branch, last
+commit, whether everything is on the remote, bundle and why, size, when
+archived) and keeps rows for projects no longer on disk. Uploads are
+`rclone copy --files-from-raw` then `rclone check`/`cryptcheck`, so a re-run
+sends only what changed; nothing on Drive or on the Mac is deleted. Drive takes
+new files at about 3 a second, so the first run of ~80k files takes most of a
+day; later runs take minutes.
+
+```bash
+code-archive --dry-run        # what would go up, which files are secret, which repos need a bundle
+code-archive                  # do it
+code-archive park plates      # archive one ~/code project, verify, say whether it's safe to rm
+code-archive fetch plates     # restore into ~/code/plates (or --to DIR), .git and all
+code-archive list             # the index
+```
+
+`launchd/com.dion.code-archive.plist` (02:30 nightly) is written but listed in
+`~/.dotfiles.skip`, so `dot link` doesn't load it; take it out of the skip file
+and `dot link` to schedule it. Settings: `~/.config/code-archive.conf` (`SKIP`,
+`TIERS`, `CODE`, `LEGACY`, `REMOTE`, `SECRET_REMOTE`). Log:
+`~/Library/Logs/drive-archive/code-<date>.log`.
