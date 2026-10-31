@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# mac-inventory -- read-only report of what a Mac has installed and how far
+# it is from ~/.dotfiles. Changes nothing: no brew update, no installs, no
+# writes outside --out. Safe on a Mac with no Homebrew, no dotfiles, no Xcode.
+#
+#   mac-inventory                    # print the report
+#   mac-inventory --out ~/inv.txt    # also save it
+#
+# Compares against ~/.dotfiles/Brewfile if it exists, else the public copy on
+# GitHub (read with curl into a temp file). Runs on stock bash 3.2.
+set -u
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_ANALYTICS=1
+
+OUT=""
+[ "${1:-}" = "--out" ] && OUT="${2:-}"
+if [ -n "$OUT" ]; then exec > >(tee "$OUT") 2>&1; fi
+
+h()  { printf '\n== %s\n' "$*"; }
+kv() { printf '  %-22s %s\n' "$1" "$2"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+ver() { have "$1" && "$@" 2>/dev/null | head -1 || echo "-"; }
+
+h "System"
+kv "host" "$(scutil --get ComputerName 2>/dev/null || hostname)"
+kv "macOS" "$(sw_vers -productVersion) ($(sw_vers -buildVersion))"
+kv "chip" "$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
+kv "memory" "$(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
+kv "disk free (/)" "$(df -h / | awk 'NR==2 {print $4 " of " $2}')"
+kv "user / shell" "$(id -un) / $SHELL"
+kv "Rosetta" "$( /usr/bin/pgrep -q oahd && echo installed || echo 'not installed')"
+kv "FileVault" "$(fdesetup status 2>/dev/null | head -1)"
+kv "Xcode CLT" "$(xcode-select -p 2>/dev/null || echo 'not installed')"
+kv "Xcode" "$( [ -d /Applications/Xcode.app ] && defaults read /Applications/Xcode.app/Contents/Info CFBundleShortVersionString 2>/dev/null || echo '-')"
+echo "  pending macOS updates (softwareupdate -l, may take a minute):"
+softwareupdate -l 2>&1 | grep -E '^\s*\*|Title:|No new software' | sed 's/^/    /'
+
+h "Homebrew"
+BREW=""
+for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+  [ -x "$b" ] && kv "found" "$b ($("$b" --version | head -1))"
+  [ -x "$b" ] && [ -z "$BREW" ] && BREW="$b"
+done
+# An M1 migrated from an Intel Mac often carries an x86 brew in /usr/local
+# that runs under Rosetta. Worth knowing before installing anything.
+[ -x /usr/local/bin/brew ] && [ "$(uname -m)" = arm64 ] && \
+  echo "  NOTE /usr/local/bin/brew on Apple Silicon is an Intel (Rosetta) install"
+if [ -n "$BREW" ]; then
+  kv "last brew update" "$(stat -f '%Sm' "$("$BREW" --repository)/.git/FETCH_HEAD" 2>/dev/null || echo unknown)"
+  kv "taps" "$("$BREW" tap | tr '\n' ' ')"
+  echo "  formulae (on request):"; "$BREW" leaves --installed-on-request | tr '\n' ' ' | fold -s -w 76 | sed 's/^/    /'; echo
+  echo "  casks:"; "$BREW" list --cask 2>/dev/null | tr '\n' ' ' | fold -s -w 76 | sed 's/^/    /'; echo
+  echo "  outdated (as of last brew update):"
+  "$BREW" outdated --greedy-auto-updates 2>/dev/null | sed 's/^/    /'
+  echo "  brew doctor (first lines):"
+  "$BREW" doctor 2>&1 | grep -E '^Warning|^Your system' | head -12 | sed 's/^/    /'
+else
+  echo "  no Homebrew"
+fi
+
+h "Against the dotfiles Brewfile"
+BF=""
+if [ -r "$HOME/.dotfiles/Brewfile" ]; then
+  BF="$HOME/.dotfiles/Brewfile"
+else
+  BF="$(mktemp -t brewfile)"
+  curl -fsSL https://raw.githubusercontent.com/dalmaer/dotfiles/main/Brewfile -o "$BF" 2>/dev/null || BF=""
+fi
+if [ -n "$BF" ] && [ -n "$BREW" ]; then
+  kv "Brewfile" "$BF"
+  have_f=" $("$BREW" list --formula -1 | tr '\n' ' ') "
+  have_c=" $("$BREW" list --cask -1 2>/dev/null | tr '\n' ' ') "
+  missing=""
+  for f in $(sed -nE 's/^[[:space:]]*brew "([^"]+)".*/\1/p' "$BF"); do
+    case "$have_f" in *" ${f##*/} "*) ;; *) missing="$missing $f";; esac
+  done
+  for c in $(sed -nE 's/^[[:space:]]*cask "([^"]+)".*/\1/p' "$BF"); do
+    case "$have_c" in *" $c "*) ;; *) missing="$missing cask:$c";; esac
+  done
+  kv "missing here" "${missing:- none}"
+elif [ -n "$BF" ]; then
+  echo "  no Homebrew, so everything in the Brewfile is missing"
+else
+  echo "  no Brewfile found (no ~/.dotfiles and GitHub unreachable)"
+fi
+
+h "Applications"
+echo "  /Applications (* = App Store, [intel] = needs Rosetta):"
+for a in /Applications/*.app "$HOME"/Applications/*.app; do
+  [ -d "$a" ] || continue
+  n="$(basename "$a" .app)"; tag=""
+  [ -d "$a/Contents/_MASReceipt" ] && tag="*"
+  exe="$(defaults read "$a/Contents/Info" CFBundleExecutable 2>/dev/null)"
+  if [ -n "$exe" ] && [ -f "$a/Contents/MacOS/$exe" ]; then
+    arch="$(lipo -archs "$a/Contents/MacOS/$exe" 2>/dev/null)"
+    case "$arch" in *arm64*) ;; "") ;; *) tag="$tag[intel]";; esac
+  fi
+  v="$(defaults read "$a/Contents/Info" CFBundleShortVersionString 2>/dev/null)"
+  printf '    %s%s %s\n' "$n" "$tag" "${v:+($v)}"
+done
+have mas && { echo "  mas list:"; mas list 2>/dev/null | sed 's/^/    /'; }
+
+h "Shell and dotfiles"
+kv "~/.dotfiles" "$( [ -d "$HOME/.dotfiles/.git" ] && (cd "$HOME/.dotfiles" && echo "$(git rev-parse --short HEAD) $(git status -s | wc -l | tr -d ' ') uncommitted") || echo 'not cloned')"
+for f in .zshrc .zprofile .zshenv .bash_profile .bashrc .profile .gitconfig .ssh/config .config/starship.toml; do
+  p="$HOME/$f"
+  if [ -L "$p" ]; then kv "~/$f" "-> $(readlink "$p")"
+  elif [ -e "$p" ]; then kv "~/$f" "file, $(wc -l < "$p" | tr -d ' ') lines (backed up by install.sh)"
+  else kv "~/$f" "-"; fi
+done
+[ -d "$HOME/.oh-my-zsh" ] && kv "oh-my-zsh" "present"
+for f in .shell.local .env.local .gitconfig.local .ssh/config.local .config/secrets.env .npmrc .env; do
+  [ -e "$HOME/$f" ] && kv "~/$f" "present (not read)"
+done
+
+h "Toolchains"
+kv "git" "$(ver git --version)"
+kv "gh" "$(ver gh --version)"
+kv "node" "$(ver node -v) $(command -v node 2>/dev/null)"
+kv "fnm / nvm" "$(ver fnm --version) / $( [ -d "$HOME/.nvm" ] && echo present || echo -)"
+kv "pnpm / corepack" "$(ver pnpm -v) / $(ver corepack --version)"
+kv "bun" "$(ver bun -v)"
+kv "python3" "$(ver python3 --version) $(command -v python3)"
+kv "uv / pyenv" "$(ver uv --version) / $(ver pyenv --version)"
+kv "ruby / rbenv" "$(ver ruby -v | cut -c1-30) / $(ver rbenv --version)"
+kv "go" "$(ver go version)"
+kv "rust" "$(ver rustc --version)"
+kv "java" "$(/usr/libexec/java_home 2>/dev/null || echo -)"
+kv "docker" "$(ver docker --version)"
+kv "claude" "$(ver claude --version)"
+kv "codex" "$(ver codex --version)"
+kv "1Password CLI" "$(ver op --version)"
+if have npm; then
+  echo "  global npm:"; npm ls -g --depth=0 2>/dev/null | sed -n '2,$p' | sed 's/^/    /'
+fi
+
+h "Identity (no secrets)"
+kv "git user" "$(git config --global user.name 2>/dev/null) <$(git config --global user.email 2>/dev/null)>"
+kv "ssh public keys" "$(ls "$HOME"/.ssh/*.pub 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+kv "1Password ssh agent" "$( [ -S "$HOME/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock" ] && echo on || echo off)"
+have gh && kv "gh auth" "$(gh auth status 2>&1 | grep -E 'Logged in|not logged' | head -1 | sed 's/^ *//')"
+
+h "Scheduled jobs and settings"
+echo "  ~/Library/LaunchAgents:"; ls "$HOME/Library/LaunchAgents" 2>/dev/null | sed 's/^/    /'
+r() { printf '  %-36s %s\n' "$1 $2" "$(defaults read "$1" "$2" 2>/dev/null || echo '(default)')"; }
+r com.apple.dock autohide; r com.apple.dock orientation; r com.apple.dock tilesize
+r com.apple.finder FXPreferredViewStyle; r com.apple.screencapture location
+r NSGlobalDomain KeyRepeat; r NSGlobalDomain InitialKeyRepeat
+echo
+echo "Done. Nothing was changed."

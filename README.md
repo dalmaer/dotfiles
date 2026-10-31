@@ -49,6 +49,7 @@ bin/                  everything here is linked into ~/bin
   code-archive        nightly: plain copy of every project to Google Drive; park/fetch one
   git-tidy            weekly: remove finished agent worktrees and merged branches in ~/code
   ledge-email-sync    keep Gmail stars and Ledge tasks in step, through BenOS (every 10 min)
+  mac-inventory       read-only report: apps, brew, toolchains, drift from the Brewfile
   nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
 launchd/              LaunchAgent templates, installed on macOS (see below)
 shell/
