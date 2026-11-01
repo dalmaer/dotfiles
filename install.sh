@@ -179,20 +179,52 @@ fi
 # --------------------------------------------------------------- homebrew --
 # Shared packages, then this machine's. `brew bundle` only adds; it never
 # removes, so a package missing from both files is left alone.
+#
+# npm lines are held back from brew bundle and installed by the next step.
+# brew bundle runs npm with PATH cut down to /usr/bin:/bin plus
+# $HOMEBREW_PREFIX/opt/node/bin, which exists only for the `node` formula.
+# With node from node@22 or fnm, every npm entry fails with
+# "env: node: No such file or directory".
+_brewfile_sans_npm() { grep -v -E '^[[:space:]]*npm[[:space:]]' "$1" || true; }
+_brewfile_npm()      { sed -n -E 's/^[[:space:]]*npm[[:space:]]+"([^"]+)".*/\1/p' "$1"; }
+
 step "Homebrew packages (Brewfile, then ~/Brewfile.local)"
 if have brew; then
   for bf in "$DOTFILES/Brewfile" "$HOME/Brewfile.local"; do
     [ -r "$bf" ] || continue
-    if brew bundle check --no-upgrade --file="$bf" >/dev/null 2>&1; then
+    if _brewfile_sans_npm "$bf" | brew bundle check --no-upgrade --file=- >/dev/null 2>&1; then
       ok "$(_tilde "$bf"): everything installed"
     else
-      run brew bundle install --no-upgrade --file="$bf" \
+      _brewfile_sans_npm "$bf" | run brew bundle install --no-upgrade --file=- \
         || warn "$(_tilde "$bf"): some packages failed -- run: brew bundle install --file=$(_tilde "$bf")"
     fi
   done
 else
   skip "Homebrew is not installed (https://brew.sh), so the Brewfiles were not applied"
 fi
+
+# ------------------------------------------------------------ npm globals --
+# With this shell's PATH, so npm finds whichever node the machine uses.
+step "Global npm packages (npm lines in the Brewfiles)"
+_npm_pkgs=""
+for bf in "$DOTFILES/Brewfile" "$HOME/Brewfile.local"; do
+  [ -r "$bf" ] && _npm_pkgs="$_npm_pkgs $(_brewfile_npm "$bf")"
+done
+_npm_pkgs="$(echo $_npm_pkgs)"   # unquoted on purpose: collapses whitespace
+if [ -z "$_npm_pkgs" ]; then
+  skip "no npm entries"
+elif ! have node || ! have npm; then
+  skip "node is not on PATH, so these were not installed: $_npm_pkgs (try: fnm install --lts)"
+else
+  for pkg in $_npm_pkgs; do
+    if npm ls -g --depth=0 "$pkg" >/dev/null 2>&1; then
+      ok "$pkg"
+    else
+      run npm install -g "$pkg" || warn "$pkg failed -- run: npm install -g $pkg"
+    fi
+  done
+fi
+unset _npm_pkgs pkg
 
 # ---------------------------------------------------------- macOS settings --
 if [ "$OS" = "darwin" ]; then

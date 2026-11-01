@@ -28,5 +28,6 @@ if OS.mac?
 end
 
 # --- Global npm --------------------------------------------------------
+# install.sh installs these with npm itself, not brew bundle (see why there).
 # Claude Code is not here: it installs and updates itself (~/.local/bin/claude).
 npm "@openai/codex"
