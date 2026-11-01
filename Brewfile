@@ -49,7 +49,6 @@ if OS.mac?
   cask "antigravity"
   cask "repo-prompt"
   cask "linear"
-  cask "notion"
   cask "obsidian"
   cask "evernote"
   cask "discord"
