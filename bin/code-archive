@@ -3,12 +3,14 @@
 # with history only where GitHub doesn't already have it.
 #
 # Meant to run nightly at 02:30 by launchd (launchd/com.dion.code-archive.plist,
-# not installed until asked for). Two sources, two tiers:
+# not installed until asked for). Three sources, three tiers:
 #
 #   current  every project directly under ~/code
 #   legacy   ~/Backups/Dropbox/SourceControl/<Group>/<project> (old Dropbox
 #            export, old employer code included; a Group that is itself one
 #            checkout is one project)
+#   projects every project directly under ~/Projects, the older layout some
+#            Macs still have (skipped where the folder doesn't exist)
 #
 # and one layout on Drive:
 #
@@ -59,8 +61,8 @@
 #
 # <project> is a ~/code name, or tier/name (legacy/Personal/16ate).
 #
-# Settings in ~/.config/code-archive.conf (optional): CODE, LEGACY, REMOTE,
-# SECRET_REMOTE, TIERS ("current legacy"), SKIP (space-separated project
+# Settings in ~/.config/code-archive.conf (optional): CODE, LEGACY, PROJECTS,
+# REMOTE, SECRET_REMOTE, TIERS ("current legacy projects"), SKIP (space-separated project
 # names, e.g. "kev legacy/ThirdParty/socket.io"), TRANSFERS, TPSLIMIT.
 # Log: ~/Library/Logs/drive-archive/code-<date>.log
 
@@ -69,9 +71,10 @@ PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 CODE="$HOME/code"
 LEGACY="$HOME/Backups/Dropbox/SourceControl"
+PROJECTS="$HOME/Projects"
 REMOTE="gdrive:Code"
 SECRET_REMOTE="gdrive-secrets:Code"
-TIERS="current legacy"
+TIERS="current legacy projects"
 SKIP=""
 TRANSFERS=8
 TPSLIMIT=10
@@ -502,19 +505,20 @@ skip_listed() { local s; for s in $SKIP; do [ "$s" = "$1" ] || [ "$s" = "$2/$1" 
 benos_library() { [ -d "$1/blobs" ] && [ -d "$1/collections" ] && [ -d "$1/connectors" ]; }
 
 projects() {
-  local tier d g c name loose
+  local tier d g c name loose root
   for tier in $TIERS; do
     case "$tier" in
-      current)
-        [ -d "$CODE" ] || { say "no $CODE, current tier skipped" >&2; continue; }
-        for d in "$CODE"/*/; do
+      current|projects)
+        root="$CODE"; [ "$tier" = projects ] && root="$PROJECTS"
+        [ -d "$root" ] || { say "no $root, $tier tier skipped" >&2; continue; }
+        for d in "$root"/*/; do
           d="${d%/}"; name=$(basename "$d")
-          if [ -L "$d" ]; then say "skip current/$name: symlink" >&2
-          elif [ -f "$d/.git" ]; then say "skip current/$name: linked worktree" >&2
+          if [ -L "$d" ]; then say "skip $tier/$name: symlink" >&2
+          elif [ -f "$d/.git" ]; then say "skip $tier/$name: linked worktree" >&2
           elif [ "$(cd "$d" && pwd -P)" = "$(cd "$HOME/benos" 2>/dev/null && pwd -P)" ] || benos_library "$d"; then
-            say "skip current/$name: BenOS library" >&2
-          elif skip_listed "$name" current; then say "skip current/$name: in SKIP" >&2
-          else printf 'current\t%s\t%s\ttree\n' "$name" "$d"
+            say "skip $tier/$name: BenOS library" >&2
+          elif skip_listed "$name" "$tier"; then say "skip $tier/$name: in SKIP" >&2
+          else printf '%s\t%s\t%s\ttree\n' "$tier" "$name" "$d"
           fi
         done ;;
       legacy)
@@ -730,7 +734,7 @@ cmd_all() {
 # find_project <arg> -> "tier<TAB>name<TAB>path<TAB>mode" from local disk.
 find_project() {
   local arg="$1" tier=current name="$1"
-  case "$arg" in current/*|legacy/*) tier="${arg%%/*}"; name="${arg#*/}" ;; esac
+  case "$arg" in current/*|legacy/*|projects/*) tier="${arg%%/*}"; name="${arg#*/}" ;; esac
   TIERS="$tier" projects 2>/dev/null | awk -F'\t' -v n="$name" '$2 == n' | head -1
 }
 
@@ -775,7 +779,7 @@ cmd_fetch() {
   done
   [ -n "$arg" ] || usage 2
   local tier=current name="$arg"
-  case "$arg" in current/*|legacy/*) tier="${arg%%/*}"; name="${arg#*/}" ;; esac
+  case "$arg" in current/*|legacy/*|projects/*) tier="${arg%%/*}"; name="${arg#*/}" ;; esac
   [ -n "$to" ] || to="$CODE/$(basename "$name")"
   if [ -e "$to" ] && [ -n "$(ls -A "$to" 2>/dev/null)" ]; then die "$to exists and isn't empty; pick another with --to"; fi
   RUN=$(mktemp -d "${TMPDIR:-/tmp}/code-archive.XXXXXX"); trap 'rm -rf "$RUN"' EXIT
