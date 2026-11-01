@@ -277,6 +277,13 @@ than `brew bundle`, so they install whether node comes from Homebrew or fnm.
 `install.sh` points screenshots at `~/Documents/Screenshots` on every Mac, the
 folder `documents-cleaner` packs and imports.
 
+It also makes email (`mailto:`) links open Gmail's compose window in Chrome.
+It compiles `macos/gmail-mailto.applescript` into
+`~/Applications/Gmail Mailto.app`, rebuilding only when the source changes, and
+makes that the default email app the first time. If you pick another mail app
+later (Mail → Settings → General), later runs leave your choice alone. To leave
+a Mac out, add `macos/gmail-mailto.applescript` to `~/.dotfiles.skip`.
+
 ## Claude Code settings
 
 `claude/settings.json` holds the Claude Code settings every machine shares:

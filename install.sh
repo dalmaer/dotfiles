@@ -288,6 +288,75 @@ if [ "$OS" = "darwin" ]; then
     run defaults write com.apple.screencapture location "$SHOTS"
     run killall SystemUIServer
   fi
+
+  # Email links open Gmail's compose window in Chrome. Chrome can register
+  # Gmail itself, but only through a click in its own prompt, per profile, with
+  # nothing a script can check. A small applet does the same job and can be set
+  # up from here. The mailto: default is claimed only on the first build, or if
+  # the applet already held it, so picking another mail app later sticks.
+  MAILTO_SRC="$DOTFILES/macos/gmail-mailto.applescript"
+  MAILTO_APP="$HOME/Applications/Gmail Mailto.app"
+  MAILTO_ID="com.dion.gmail-mailto"
+  _mailto_handler() {
+    osascript -l JavaScript -e 'ObjC.import("AppKit"); var u = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("mailto:a@example.com")); u.isNil() ? "" : ObjC.unwrap(u.path)' 2>/dev/null
+  }
+  _build_gmail_mailto() {   # _build_gmail_mailto <src> <app> <bundle-id> <sha>
+    local plist="$2/Contents/Info.plist" pb=/usr/libexec/PlistBuddy out
+    mkdir -p "$(dirname "$2")"
+    # osacompile chatters about re-signing; only show it when it fails.
+    out="$(osacompile -o "$2" "$1" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
+    "$pb" -c "Set :CFBundleIdentifier $3" "$plist" 2>/dev/null \
+      || "$pb" -c "Add :CFBundleIdentifier string $3" "$plist" || return 1
+    "$pb" -c "Add :LSUIElement bool true" \
+      -c "Add :CFBundleURLTypes array" -c "Add :CFBundleURLTypes:0 dict" \
+      -c "Add :CFBundleURLTypes:0:CFBundleURLName string Email" \
+      -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" \
+      -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string mailto" "$plist" || return 1
+    printf '%s\n' "$4" > "$2/Contents/Resources/source.sha256"
+    # The Info.plist edits break osacompile's ad-hoc signature; re-sign last.
+    codesign --force --sign - "$2" >/dev/null 2>&1 || return 1
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$2"
+  }
+  if should_skip macos/gmail-mailto.applescript; then
+    skip "Gmail email links (listed in ~/.dotfiles.skip)"
+  elif [ ! -d "/Applications/Google Chrome.app" ]; then
+    skip "Gmail email links: Google Chrome is not installed"
+  else
+    _sum="$(shasum -a 256 "$MAILTO_SRC" | cut -d' ' -f1)"
+    _have="$(cat "$MAILTO_APP/Contents/Resources/source.sha256" 2>/dev/null || true)"
+    _claim=0
+    { [ ! -e "$MAILTO_APP" ] || [ "$(_mailto_handler)" = "$MAILTO_APP" ]; } && _claim=1
+    if [ "$_sum" = "$_have" ]; then
+      ok "$(_tilde "$MAILTO_APP") is current"
+    elif [ "$DRY_RUN" = "1" ]; then
+      printf '  %swould%s build %s from %s\n' "$C_YEL" "$C_RESET" \
+        "$(_tilde "$MAILTO_APP")" "macos/gmail-mailto.applescript"
+    else
+      if [ -e "$MAILTO_APP" ]; then
+        mkdir -p "$BACKUP_DIR/Applications"
+        mv "$MAILTO_APP" "$BACKUP_DIR/Applications/"
+        warn "backed up $(_tilde "$MAILTO_APP") -> $(_tilde "$BACKUP_DIR")/Applications/"
+      fi
+      if _build_gmail_mailto "$MAILTO_SRC" "$MAILTO_APP" "$MAILTO_ID" "$_sum"; then
+        ok "built $(_tilde "$MAILTO_APP")"
+      else
+        warn "could not build $(_tilde "$MAILTO_APP"); email links are unchanged"
+        _claim=0
+      fi
+    fi
+    # After a (re)build only: the default is keyed by bundle id, so it is set
+    # again in case the id changed.
+    if [ "$_claim" = "1" ] && [ "$_sum" != "$_have" ]; then
+      if [ "$DRY_RUN" = "1" ]; then
+        printf '  %swould%s make email links open Gmail\n' "$C_YEL" "$C_RESET"
+      elif osascript -l JavaScript -e "ObjC.import('CoreServices'); \$.LSSetDefaultHandlerForURLScheme(\$('mailto'), \$('$MAILTO_ID'))" >/dev/null; then
+        ok "email links open Gmail"
+      fi
+    fi
+    unset _sum _have _claim
+  fi
+  unset -f _mailto_handler _build_gmail_mailto
+  unset MAILTO_SRC MAILTO_APP MAILTO_ID
 fi
 
 # ---------------------------------------------------------------- secrets --
