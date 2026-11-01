@@ -226,6 +226,54 @@ else
 fi
 unset _npm_pkgs pkg
 
+# --------------------------------------------------------- claude settings --
+# Merged, not linked: ~/.claude/settings.json also holds this machine's hooks,
+# and Claude Code rewrites the file itself, so a symlink would push those
+# writes to this public repo. Only the keys in claude/settings.json are set;
+# every other key is left as it is.
+step "Claude Code settings (claude/settings.json into ~/.claude/settings.json)"
+CS_SRC="$DOTFILES/claude/settings.json" CS_DST="$HOME/.claude/settings.json"
+if ! have python3; then
+  skip "python3 is not on PATH, so $(_tilde "$CS_DST") was not updated"
+else
+  _cs_merge() {   # _cs_merge <src> <dst> <check|print>
+    python3 - "$@" <<'PY'
+import json, sys
+src, dst, mode = sys.argv[1:4]
+want = json.load(open(src))
+try:
+    have = json.load(open(dst))
+except FileNotFoundError:
+    have = {}
+merged = dict(have)
+for k, v in want.items():
+    merged[k] = {**merged[k], **v} if isinstance(v, dict) and isinstance(merged.get(k), dict) else v
+if mode == "check":
+    sys.exit(0 if merged == have else 1)
+print(json.dumps(merged, indent=2))
+PY
+  }
+  if _cs_merge "$CS_SRC" "$CS_DST" check 2>/dev/null; then
+    ok "$(_tilde "$CS_DST"): no commit or PR attribution"
+  elif ! _cs_merge "$CS_SRC" "$CS_DST" print >/dev/null 2>&1; then
+    warn "$(_tilde "$CS_DST") is not valid JSON -- left alone"
+  elif [ "$DRY_RUN" = "1" ]; then
+    printf '  %swould%s turn off commit and PR attribution in %s\n' "$C_YEL" "$C_RESET" "$(_tilde "$CS_DST")"
+  else
+    # The old file is kept, like everything else install.sh replaces.
+    if [ -e "$CS_DST" ]; then
+      mkdir -p "$BACKUP_DIR/.claude"
+      cp -p "$CS_DST" "$BACKUP_DIR/.claude/settings.json"
+      warn "backed up $(_tilde "$CS_DST") -> $(_tilde "$BACKUP_DIR")/.claude/settings.json"
+    fi
+    mkdir -p "$HOME/.claude"
+    _cs_merge "$CS_SRC" "$CS_DST" print > "$CS_DST.tmp" && mv "$CS_DST.tmp" "$CS_DST" \
+      && ok "$(_tilde "$CS_DST"): commit and PR attribution off"
+  fi
+  unset -f _cs_merge
+fi
+unset CS_SRC CS_DST
+
 # ---------------------------------------------------------- macOS settings --
 if [ "$OS" = "darwin" ]; then
   step "macOS settings"

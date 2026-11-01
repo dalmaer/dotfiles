@@ -276,6 +276,15 @@ so the same file works on Linux.
 `install.sh` points screenshots at `~/Documents/Screenshots` on every Mac, the
 folder `documents-cleaner` packs and imports.
 
+## Claude Code settings
+
+`claude/settings.json` holds the Claude Code settings every machine shares:
+today, no "Co-Authored-By" line in commits and no attribution in PRs.
+`install.sh` merges its keys into `~/.claude/settings.json` and leaves every
+other key alone, keeping the old file in `backup/` first. It is merged rather
+than linked because that file also holds one machine's hooks, and Claude Code
+rewrites it itself.
+
 ## BenOS updates
 
 `benos-autoupdate` runs hourly (launchd). When the BenOS app has downloaded an
