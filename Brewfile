@@ -25,6 +25,9 @@ brew "bun"
 if OS.mac?
   cask "tailscale-app"
   cask "gcloud-cli"
+
+  tap "spacefarm-digital/tap"
+  cask "spacefarm-digital/tap/sunlight"   # Apple Silicon only; Sparkle updates it
 end
 
 # --- Global npm --------------------------------------------------------
