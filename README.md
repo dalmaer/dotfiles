@@ -65,6 +65,7 @@ shell/
   os/
     darwin-env.sh     darwin-interactive.sh
     linux-env.sh      linux-interactive.sh
+  hosts/              <host>-env.sh, <host>-interactive.sh  (one machine; see below)
 git/                  gitconfig, gitignore_global
 ssh/                  config (includes config.local first)
 config/               starship.toml
@@ -151,6 +152,25 @@ unconditionally.
 `~/.config/secrets.env` must contain only comments and `KEY=value` /
 `export KEY=value` lines. Any other line is executed as a command when the
 file is sourced. `dot validate` checks for this.
+
+## Per-host files
+
+For differences between your own machines that are fine to publish (which
+Python a Mac uses, a toolchain only one box has), use `shell/hosts/` instead
+of a `.local` file, so the setting is versioned and follows a reinstall.
+
+`env.sh` sets `$_DOTFILES_HOST` to the short hostname, lowercased: on macOS
+`scutil --get LocalHostName`, elsewhere `hostname -s`. Then it sources
+`shell/hosts/$_DOTFILES_HOST-env.sh` just before `~/bin` goes on `PATH`, and
+the rc files source `shell/hosts/$_DOTFILES_HOST-interactive.sh` after the OS
+file. Both are optional. To start one for the current machine:
+
+```bash
+echo "$_DOTFILES_HOST"   # e.g. dions-macbook-pro-m1
+```
+
+This repo is public, so work hosts, keys and internal URLs still go in the
+`.local` files above.
 
 ## Opting out on one machine
 

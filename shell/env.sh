@@ -12,6 +12,16 @@ case "$(uname -s)" in
 esac
 export _DOTFILES_OS
 
+# Short hostname, lowercased: picks shell/hosts/<host>-*.sh. On macOS use
+# LocalHostName, since `hostname` follows whatever DHCP hands out and would
+# load another machine's config on someone else's network.
+_h=""
+[ "$_DOTFILES_OS" = darwin ] && _h="$(scutil --get LocalHostName 2>/dev/null)"
+[ -n "$_h" ] || _h="$(hostname -s 2>/dev/null)"
+_DOTFILES_HOST="$(printf '%s' "$_h" | tr '[:upper:]' '[:lower:]')"
+export _DOTFILES_HOST
+unset _h
+
 # Prepend to PATH only if the directory exists and is not already there.
 path_prepend() {
   [ -d "$1" ] || return 0
@@ -63,9 +73,19 @@ path_prepend "$HOME/.cargo/bin"
 path_prepend "$HOME/go/bin"
 path_prepend "$HOME/.npm-global/bin"   # npm i -g without sudo (npm prefix)
 path_prepend "$HOME/.jbang/bin"
+# pnpm's own default home, which differs by OS.
+_pn="$HOME/Library/pnpm"; [ "$_DOTFILES_OS" = linux ] && _pn="$XDG_DATA_HOME/pnpm"
+export PNPM_HOME="${PNPM_HOME:-$_pn}"
+unset _pn
+path_prepend "$PNPM_HOME"
 
 # --- Editor CLIs (each only where that editor is installed) -------------
 path_prepend "$HOME/.antigravity/antigravity/bin"
+
+# --- Per-host environment, committed ------------------------------------
+# Before our own scripts, so ~/bin still wins over anything a host adds.
+[ -r "$DOTFILES/shell/hosts/${_DOTFILES_HOST}-env.sh" ] \
+  && . "$DOTFILES/shell/hosts/${_DOTFILES_HOST}-env.sh"
 
 # --- Our own scripts win over everything --------------------------------
 path_prepend "$HOME/.local/bin"

@@ -42,6 +42,7 @@
 	ci = commit
 	unstage = reset HEAD --
 	last = log -1 HEAD
+	ll = log --oneline
 	lg = log --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit
 	recent = log -10 HEAD
 	aa = add .

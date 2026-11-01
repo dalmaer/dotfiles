@@ -21,6 +21,9 @@ unset _f
 [ -r "$DOTFILES/shell/os/${_DOTFILES_OS}-interactive.sh" ] \
   && . "$DOTFILES/shell/os/${_DOTFILES_OS}-interactive.sh"
 
+[ -r "$DOTFILES/shell/hosts/${_DOTFILES_HOST}-interactive.sh" ] \
+  && . "$DOTFILES/shell/hosts/${_DOTFILES_HOST}-interactive.sh"
+
 # Machine-specific, never committed. Shared with bash, so keep it portable or
 # branch on $ZSH_VERSION.
 [ -r "$HOME/.shell.local" ] && . "$HOME/.shell.local"
