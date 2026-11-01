@@ -20,6 +20,7 @@ brew "tree"
 brew "ffmpeg"
 brew "age"
 brew "uv"                  # Python versions, venvs and tools
+brew "iperf3"              # network speed between machines (iperf3 -s / -c)
 
 # --- Runtimes ----------------------------------------------------------
 brew "bun"
