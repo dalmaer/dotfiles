@@ -52,6 +52,13 @@ except Exception: print("")')"
 # --immutable. owner.json beside each repository is BenOS's small, mutable note
 # about the repository (who owns it, its last backup); it is copied normally,
 # and Object Lock keeps every earlier version of it.
+#
+# The copy compares by size only (--size-only). Each restic file is named by
+# its contents' hash, so a file with the same name and size holds the same
+# data. Dates are no guide: copying the repository to a new drive can change
+# them (the 2 TB drive's copies have whole-second times, B2's keep
+# milliseconds), and --immutable would call each one "modified". The check
+# below still compares every file's hash.
 FILTER=(--exclude "**/locks/**" --exclude ".DS_Store" --exclude "**/owner.json")
 
 # Files BenOS writes while this runs go up next time; the check skips them.
@@ -63,7 +70,7 @@ for remote in $REMOTES; do
     say "copying $DEST -> $TARGET"
     # Google Drive takes at most 750 GB a day; stopping at the limit (exit 7)
     # just means the rest goes up on the next night's run.
-    rclone copy "$DEST" "$TARGET" "${FILTER[@]}" --immutable --fast-list \
+    rclone copy "$DEST" "$TARGET" "${FILTER[@]}" --immutable --size-only --fast-list \
       --drive-stop-on-upload-limit \
       --transfers 8 --checkers 16 --stats 5m --stats-one-line --log-level NOTICE
     rc=$?
