@@ -269,7 +269,8 @@ created as a stub by `install.sh`) lists one machine's extras. `install.sh`
 runs `brew bundle install --no-upgrade` on both, and the nightly job does too,
 so a package added here on one Mac appears on the others after `dot sync` and
 the next 3am run. Neither ever uninstalls anything. Casks sit under `if OS.mac?`
-so the same file works on Linux.
+so the same file works on Linux. Both hand `npm` lines to npm itself rather
+than `brew bundle`, so they install whether node comes from Homebrew or fnm.
 
 ## macOS settings
 
