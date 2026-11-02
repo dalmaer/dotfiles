@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# media-offsite -- keep the external media drive and its Google Drive folder as
+# one library, each a full copy of the other.
+#
+# Run by launchd (launchd/com.dion.media-offsite.plist) whenever a disk mounts
+# and nightly at 4am. Does nothing unless the drive is connected and this Mac
+# has ~/.config/media-offsite.conf (machine-specific, never committed):
+#     VOLUME="/Volumes/Media"
+#     REMOTE="gdrive:Media"
+#
+#   * copies both ways and never deletes or overwrites (`--ignore-existing`):
+#     a file removed or edited on one side is left alone on the other, so a
+#     mistake on the drive can't reach Drive and the reverse;
+#   * then checks that every file on the drive is on Drive, so nothing lives
+#     only on the drive;
+#   * stops at Google's 750 GB/day upload limit (exit 7); the rest goes up on
+#     the next run.
+#
+# Safe to run by hand: `media-offsite` (or `--check` to only verify).
+# Log: ~/Library/Logs/media-offsite.log
+
+set -uo pipefail
+
+CONF="$HOME/.config/media-offsite.conf"
+[ -r "$CONF" ] || exit 0
+VOLUME=""; REMOTE=""
+# shellcheck disable=SC1090
+. "$CONF"
+[ -n "$VOLUME" ] && [ -n "$REMOTE" ] || { echo "media-offsite: set VOLUME and REMOTE in $CONF"; exit 0; }
+# launchd runs this on every mount, so a missing drive is the usual case: stay quiet.
+[ -d "$VOLUME" ] || exit 0
+
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+command -v rclone >/dev/null || { echo "media-offsite: rclone isn't installed"; exit 1; }
+
+say() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*"; }
+notify() { /usr/bin/osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true; }
+
+# One run at a time: mounting a second disk mid-run would start another.
+LOCK="${TMPDIR:-/tmp}/media-offsite.lock"
+mkdir "$LOCK" 2>/dev/null || exit 0
+trap 'rmdir "$LOCK"' EXIT
+
+# Finder and Spotlight litter; never worth copying either way.
+FILTER=(--exclude ".DS_Store" --exclude "._*" --exclude ".Spotlight-V100/**"
+  --exclude ".Trashes/**" --exclude ".fseventsd/**" --exclude ".TemporaryItems/**"
+  --exclude ".DocumentRevisions-V100/**" --exclude ".metadata_never_index")
+COMMON=(--ignore-existing --drive-skip-gdocs --fast-list
+  --transfers 8 --checkers 16 --stats 10m --stats-one-line --log-level NOTICE)
+
+failed=0
+if [ "${1:-}" != "--check" ]; then
+  say "copying $VOLUME -> $REMOTE"
+  rclone copy "$VOLUME" "$REMOTE" "${FILTER[@]}" "${COMMON[@]}" --drive-stop-on-upload-limit
+  rc=$?
+  if [ "$rc" = 7 ]; then
+    say "Google's daily upload limit reached; the rest goes up next run"
+  elif [ "$rc" != 0 ]; then
+    say "error: the copy to $REMOTE failed"
+    notify "Media backup failed" "The copy to Google Drive didn't finish. See ~/Library/Logs/media-offsite.log."
+    failed=1
+  fi
+
+  say "copying $REMOTE -> $VOLUME"
+  if ! rclone copy "$REMOTE" "$VOLUME" "${FILTER[@]}" "${COMMON[@]}"; then
+    say "error: the copy from $REMOTE failed"
+    notify "Media backup failed" "The copy from Google Drive didn't finish. See ~/Library/Logs/media-offsite.log."
+    failed=1
+  fi
+fi
+
+say "checking every file on $VOLUME is on $REMOTE"
+if rclone check "$VOLUME" "$REMOTE" "${FILTER[@]}" --one-way --size-only --fast-list --log-level NOTICE; then
+  say "ok: everything on the drive is on Drive"
+else
+  say "error: some files on the drive aren't on Drive yet"
+  # Expected while a large first upload is spread over several days.
+  [ "${rc:-0}" = 7 ] || notify "Media backup check failed" "Some files on the drive aren't on Google Drive. See ~/Library/Logs/media-offsite.log."
+  failed=1
+fi
+exit "$failed"
