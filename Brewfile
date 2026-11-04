@@ -21,6 +21,7 @@ brew "ffmpeg"
 brew "age"
 brew "uv"                  # Python versions, venvs and tools
 brew "iperf3"              # network speed between machines (iperf3 -s / -c)
+brew "shellcheck"          # runme check needs it
 
 # --- Runtimes ----------------------------------------------------------
 brew "bun"

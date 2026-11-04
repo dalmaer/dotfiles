@@ -38,6 +38,7 @@ fails if anything under `backup/` is ever tracked.
 install.sh            first-run setup; --dry-run to preview
 dotfiles.conf         manifest: repo path -> target path
 Brewfile              Homebrew packages for every machine (extras: ~/Brewfile.local)
+agents/AGENTS.md      global instructions for every coding agent (Claude, Codex, ...)
 lib/common.sh         shared helpers (os detection, linking, dry-run)
 bin/                  everything here is linked into ~/bin
   dot                 the CLI
@@ -50,6 +51,7 @@ bin/                  everything here is linked into ~/bin
   git-tidy            weekly: remove finished agent worktrees and merged branches in ~/code
   ledge-email-sync    keep Gmail stars and Ledge tasks in step, through BenOS (every 10 min)
   mac-inventory       read-only report: apps, brew, toolchains, drift from the Brewfile
+  runme               agents queue one checked script; you type `runme` to run it
   nightly-update.sh   brew update/upgrade/cleanup, run by launchd at 3am
 launchd/              LaunchAgent templates, installed on macOS (see below)
 shell/

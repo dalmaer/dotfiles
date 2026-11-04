@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# runme -- hand a person one checked script to run, instead of a page of
+# commands to copy.
+#
+# Agents (Claude Code, Codex and the rest) sometimes need the person at the
+# keyboard to run something themselves: sudo, System Settings, a sign-in, a
+# change the agent's own rules or sandbox forbid. Often that person is on a
+# phone, signed in to this Mac over ssh/mosh, where copying several command
+# blocks is slow and easy to get wrong. So the agent writes one script, checks
+# it, and the person types `runme`.
+#
+#   runme new <name> [why]     agent: write ~/.runme/<date>-<name>.sh from a template
+#   runme check <name|file>    agent: validate it; the script won't run until it passes
+#   runme                      person: show the waiting script, confirm, run it, log it
+#   runme run <name>           person: the same, for one named script
+#   runme list                 scripts waiting to be run
+#   runme show <name>          print a script
+#   runme log [name]           print the newest log (or that script's), for the agent
+#   runme push <host> <name>   copy a checked script to another Mac's queue over ssh
+#
+# A script passes `check` only if it parses, passes shellcheck, has no TODO
+# left from the template, pipes no download into a shell and holds nothing
+# key-shaped. The check records the script's hash; `run` refuses a script that
+# changed after it was checked, so what was checked is what runs.
+#
+# Queue: ~/.runme (RUNME_DIR to override). Run scripts move to done/ and their
+# output is kept in logs/.
+
+set -uo pipefail
+
+DIR="${RUNME_DIR:-$HOME/.runme}"
+DONE="$DIR/done" LOGS="$DIR/logs"
+
+die()  { echo "runme: $*" >&2; exit 1; }
+usage() { grep '^#   runme' "$0" | sed 's/^#   //'; exit 2; }
+
+hash_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+
+# resolve <name|file> -- the waiting script a name refers to. Accepts a path, a
+# full file name, or the <name> given to `new` (the newest one wins).
+resolve() {
+  local q="$1" f
+  [ -f "$q" ] && { echo "$q"; return; }
+  [ -f "$DIR/$q" ] && { echo "$DIR/$q"; return; }
+  f="$(ls -1 "$DIR"/*-"$q".sh 2>/dev/null | tail -1)"
+  [ -n "$f" ] || die "no waiting script called '$q' (runme list)"
+  echo "$f"
+}
+
+pending() { ls -1 "$DIR"/*.sh 2>/dev/null; }
+
+why_of() { sed -n 's/^# why: //p' "$1" | head -1; }
+
+cmd_new() {
+  local name="${1:-}" why="${2:-TODO: one line on what this does and why}"
+  [ -n "$name" ] || die "usage: runme new <name> [why]"
+  case "$name" in *[!a-z0-9-]*) die "name '$name': use a-z, 0-9 and -" ;; esac
+  mkdir -p "$DIR"
+  local f; f="$DIR/$(date +%Y%m%d-%H%M)-$name.sh"
+  [ -e "$f" ] && die "$f already exists"
+  cat > "$f" <<TEMPLATE
+#!/usr/bin/env bash
+# runme: $name
+# why: $why
+# Written for a person to run with \`runme\`. Each step must be safe to run
+# twice, and the last step must prove it worked (exit 1 if not).
+set -euo pipefail
+step() { printf '\n==> %s\n' "\$*"; }
+
+step "TODO: first step"
+# TODO: commands
+
+step "Check"
+# TODO: prove it worked, e.g.
+#   [ -f "\$HOME/some/file" ] || { echo "FAIL: some/file is missing"; exit 1; }
+echo "OK"
+TEMPLATE
+  chmod 600 "$f"
+  echo "$f"
+}
+
+cmd_check() {
+  local f; f="$(resolve "${1:-}")" || exit 1
+  local bad=0
+  _fail() { echo "  FAIL $*"; bad=1; }
+  echo "checking $f"
+
+  bash -n "$f" 2>&1 | sed 's/^/  /' || true
+  bash -n "$f" 2>/dev/null || _fail "does not parse (bash -n)"
+
+  if command -v shellcheck >/dev/null 2>&1; then
+    shellcheck -s bash -S warning "$f" | sed 's/^/  /'
+    [ "${PIPESTATUS[0]}" = "0" ] || _fail "shellcheck found problems"
+  else
+    _fail "shellcheck is not installed (brew install shellcheck)"
+  fi
+
+  grep -q '^# why: ' "$f" || _fail "no '# why:' line saying what it does"
+  grep -n 'TODO' "$f" | sed 's/^/  /'
+  grep -q 'TODO' "$f" && _fail "TODO left from the template"
+  grep -q '^set -euo pipefail' "$f" || _fail "missing 'set -euo pipefail'"
+  if grep -nE '(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z)?sh' "$f"; then
+    _fail "pipes a download into a shell; download, check, then run it"
+  fi
+  if grep -nE '(sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|AIza[A-Za-z0-9_-]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[A-Za-z0-9-]{10,})' "$f" >/dev/null; then
+    _fail "holds something key-shaped; read secrets at run time (op read, env)"
+  fi
+
+  if [ "$bad" = "1" ]; then
+    rm -f "$f.ok"
+    echo "not ready: fix the above and check again"
+    exit 1
+  fi
+  hash_of "$f" > "$f.ok"
+  echo "ok: ready. Tell the person to run: runme"
+}
+
+cmd_list() {
+  local f n=0
+  for f in $(pending); do
+    n=$((n + 1))
+    local state="checked"; [ "$(cat "$f.ok" 2>/dev/null)" = "$(hash_of "$f")" ] || state="NOT CHECKED"
+    printf '%2d  %s  [%s]\n      %s\n' "$n" "$(basename "$f" .sh)" "$state" "$(why_of "$f")"
+  done
+  [ "$n" = "0" ] && echo "nothing waiting"
+  return 0
+}
+
+cmd_run() {
+  local f
+  if [ -n "${1:-}" ]; then
+    f="$(resolve "$1")" || exit 1
+  else
+    local all; all="$(pending)"
+    [ -n "$all" ] || { echo "nothing waiting"; exit 0; }
+    if [ "$(printf '%s\n' "$all" | wc -l | tr -d ' ')" = "1" ]; then
+      f="$all"
+    else
+      cmd_list
+      printf 'Which one? [number] '
+      local n; read -r n
+      case "$n" in ''|*[!0-9]*) die "not a number" ;; esac
+      f="$(printf '%s\n' "$all" | sed -n "${n}p")"
+      [ -n "$f" ] || die "no script $n"
+    fi
+  fi
+
+  [ "$(cat "$f.ok" 2>/dev/null)" = "$(hash_of "$f")" ] \
+    || die "$(basename "$f") hasn't passed 'runme check' since it last changed. Ask the agent to check it."
+
+  echo "---------------------------------------------------------------"
+  cat "$f"
+  echo "---------------------------------------------------------------"
+  printf 'Run %s? [y/N] ' "$(basename "$f" .sh)"
+  local yn; read -r yn
+  case "$yn" in y|Y|yes) ;; *) echo "not run"; exit 0 ;; esac
+
+  mkdir -p "$DONE" "$LOGS"
+  local base; base="$(basename "$f" .sh)"
+  local log="$LOGS/$base.log"
+  {
+    echo "runme: $base"
+    echo "started: $(date '+%Y-%m-%d %H:%M:%S') on $(hostname -s)"
+  } > "$log"
+  bash "$f" 2>&1 | tee -a "$log"
+  local rc="${PIPESTATUS[0]}"
+  echo "exit: $rc  finished: $(date '+%H:%M:%S')" >> "$log"
+  mv "$f" "$DONE/" && mv "$f.ok" "$DONE/" 2>/dev/null
+  echo
+  if [ "$rc" = "0" ]; then echo "done. Log: $log"
+  else echo "FAILED (exit $rc). Log: $log"; fi
+  exit "$rc"
+}
+
+cmd_show() { cat "$(resolve "${1:-}")"; }
+
+cmd_log() {
+  local l
+  if [ -n "${1:-}" ]; then l="$(ls -1 "$LOGS"/*"$1"*.log 2>/dev/null | tail -1)"
+  else l="$(ls -1t "$LOGS"/*.log 2>/dev/null | head -1)"; fi
+  [ -n "$l" ] || die "no log yet"
+  cat "$l"
+}
+
+cmd_push() {
+  local host="${1:-}" f
+  [ -n "$host" ] && [ -n "${2:-}" ] || die "usage: runme push <host> <name>"
+  f="$(resolve "$2")" || exit 1
+  [ "$(cat "$f.ok" 2>/dev/null)" = "$(hash_of "$f")" ] || die "check it first: runme check $2"
+  # The remote queue is ~/.runme; RUNME_DIR there is not consulted.
+  ssh "$host" 'mkdir -p ~/.runme && chmod 700 ~/.runme' || die "can't reach $host over ssh"
+  scp -q "$f" "$f.ok" "$host:.runme/" || die "copy to $host failed"
+  mv "$f" "$DONE/" 2>/dev/null || { mkdir -p "$DONE"; mv "$f" "$DONE/"; }
+  mv "$f.ok" "$DONE/" 2>/dev/null
+  echo "on $host now. Tell the person to run runme there."
+}
+
+case "${1:-}" in
+  '')            cmd_run ;;
+  new)           shift; cmd_new "$@" ;;
+  check)         shift; cmd_check "$@" ;;
+  run)           shift; cmd_run "$@" ;;
+  list|ls)       cmd_list ;;
+  show)          shift; cmd_show "$@" ;;
+  log)           shift; cmd_log "$@" ;;
+  push)          shift; cmd_push "$@" ;;
+  -h|--help|help) usage ;;
+  *)             die "unknown command '$1' (runme --help)" ;;
+esac
