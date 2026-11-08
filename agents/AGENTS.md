@@ -38,3 +38,28 @@ copy carefully.
 
 If your sandbox stops `runme new` writing to `~/.runme`, ask for permission to
 run it rather than falling back to printing the commands.
+
+## Coordinate project agents without duplicate work
+
+For machine-wide routing, check the private locator at
+`~/.config/home-infra/project.json` when present, then read the project guide it
+names. The locator is local inventory, not permission or proof of availability.
+Keep machine names, private paths and session records out of these public dotfiles.
+
+Resolve the exact project, machine, provider and existing task before starting.
+Plates records durable goals, phase claims and evidence; GitHub records commits,
+reviews and CI; Rex reports terminal sessions and presence. None substitutes for
+the others. An unread or unreachable source is unknown, never free or idle.
+
+Each active worker needs a stable unique `PLATES_SESSION` and explicit provider.
+Use the private project's identity wrapper where available, or set the variables
+on every command. Do not reuse a parent's identity for parallel children or create
+a fresh identity for each command. Separate concurrent writers into worktrees,
+claim before building, and stop when another worker owns the claim.
+
+A handoff retains the exact task, scope, approvals, branch, commit, checks,
+uncertain effects and next action. Verify the old writer stopped before the new
+one starts. Claim tokens and attach receipts are checkout-local; a token alone
+cannot transfer ownership across machines. Never steal a live claim or treat a
+lost dispatch reply as permission to launch a duplicate. Respect the project's
+review, integration and installation checks, and keep unverified routes disabled.
