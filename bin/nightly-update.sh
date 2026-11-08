@@ -19,6 +19,11 @@ done
 [ -n "$brew" ] || { echo "nightly-update: no Homebrew found, nothing to do"; exit 0; }
 eval "$("$brew" shellenv)"
 
+# launchd doesn't read shell/env.sh either. Without this, brew looks for its
+# tap-trust list in ~/.homebrew instead of ~/.config/homebrew, where
+# `brew trust` saved it from a shell, and skips every third-party tap.
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+
 export HOMEBREW_NO_ENV_HINTS=1
 export HOMEBREW_NO_AUTO_UPDATE=1   # `brew update` runs explicitly below
 
@@ -56,12 +61,19 @@ for pkg in $npm_pkgs; do
     echo "nightly-update: no node or npm found, skipped npm packages: $npm_pkgs"
     break
   fi
-  $npm_cmd ls -g --depth=0 "$pkg" >/dev/null 2>&1 && continue
-  $npm_cmd install -g "$pkg" || echo "nightly-update: npm install -g $pkg failed"
+  # Only the Brewfiles' packages: globals installed some other way are left alone.
+  # `install @latest`, not `npm update -g`: update also tries to rewrite npm's
+  # own files, which Homebrew's node keeps read-only (EACCES on npm/npmrc).
+  $npm_cmd install -g "$pkg@latest" >/dev/null || echo "nightly-update: npm install -g $pkg@latest failed"
 done
 
+# Claude Code's native install updates itself only when it starts, so a Mac
+# where nobody ran `claude` today would fall behind.
+if [ -x "$HOME/.local/bin/claude" ]; then
+  "$HOME/.local/bin/claude" update || echo "nightly-update: claude update failed"
+fi
+
 # Add other tools here, e.g.:
-# npm update -g
 # rustup update
 
 echo "===== done $(date '+%H:%M:%S') ====="
