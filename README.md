@@ -221,7 +221,7 @@ cron: a job due while the Mac sleeps runs on wake, where cron skips it.
 
 | Agent | Runs | When | Log |
 |---|---|---|---|
-| `com.dion.nightly-update` | `~/bin/nightly-update.sh`: `brew update`, `upgrade --formula`, `upgrade --cask`, `cleanup` | 03:00 daily | `~/Library/Logs/nightly-update.log` |
+| `com.dion.nightly-update` | `~/bin/nightly-update.sh`: `brew update`, `upgrade --formula`, `upgrade --cask`, `cleanup`, then any executables in `~/.config/nightly-update.d` (this Mac's own steps, kept out of this repo) | 03:00 daily | `~/Library/Logs/nightly-update.log` |
 
 The plists are **copied, not linked**, unlike everything else here: launchd
 expands neither `~` nor `$HOME`, so each template says `__HOME__` and the

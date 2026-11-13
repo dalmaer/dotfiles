@@ -76,4 +76,18 @@ fi
 # Add other tools here, e.g.:
 # rustup update
 
+# This machine's own nightly steps, kept outside this public repo: every
+# executable in ~/.config/nightly-update.d runs last, in name order, with the
+# PATH set up above. One failing is logged and does not stop the others.
+hooks="$HOME/.config/nightly-update.d"
+if [ -d "$hooks" ]; then
+  for hook in "$hooks"/*; do
+    [ -f "$hook" ] && [ -x "$hook" ] || continue
+    echo "--- $(basename "$hook")"
+    "$hook"
+    rc=$?
+    [ "$rc" = 0 ] || echo "nightly-update: $(basename "$hook") failed (exit $rc)"
+  done
+fi
+
 echo "===== done $(date '+%H:%M:%S') ====="
