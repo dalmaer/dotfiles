@@ -63,3 +63,12 @@ one starts. Claim tokens and attach receipts are checkout-local; a token alone
 cannot transfer ownership across machines. Never steal a live claim or treat a
 lost dispatch reply as permission to launch a duplicate. Respect the project's
 review, integration and installation checks, and keep unverified routes disabled.
+
+## Name each project's home session the same way
+
+Every project in the fleet has one long-lived Claude desktop session that the
+person steers from their phone. Title it `🏠 [project] Home Remote Control`,
+with the project's name in lowercase inside the brackets, e.g.
+`🏠 [plates] Home Remote Control`. Other home sessions follow the same form
+(`🏠 [ledger] Home Capture`). When you create one, use that title and turn
+Remote Control on for it.
