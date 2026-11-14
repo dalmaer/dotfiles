@@ -42,7 +42,7 @@ run it rather than falling back to printing the commands.
 ## Coordinate project agents without duplicate work
 
 For machine-wide routing, check the private locator at
-`~/.config/home-infra/project.json` when present, then read the project guide it
+`~/.config/home/project.json` when present, then read the project guide it
 names. The locator is local inventory, not permission or proof of availability.
 Keep machine names, private paths and session records out of these public dotfiles.
 
