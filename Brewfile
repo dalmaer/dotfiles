@@ -48,6 +48,7 @@ if OS.mac?
   cask "chatgpt"
   cask "conductor"
   cask "antigravity"
+  cask "antigravity-cli"     # agy in the terminal; nightly-update upgrades it
   cask "repo-prompt"
   cask "linear"
   cask "obsidian"
