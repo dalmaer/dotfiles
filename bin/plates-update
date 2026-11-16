@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# plates-update -- keep the Plates CLI at the newest commit on its main branch
+# whose CI check passed.
+#
+# Plates isn't on the npm registry (the npm package called "plates" is someone
+# else's), so this installs straight from GitHub into ~/.npm-global, the npm
+# prefix shell/env.sh puts first on PATH. The repo is public: no sign-in needed,
+# which matters at 3am under launchd.
+#
+# Off by default. A Mac opts in by linking it into its nightly steps:
+#     mkdir -p ~/.config/nightly-update.d
+#     ln -s ~/.dotfiles/bin/plates-update ~/.config/nightly-update.d/plates
+# Safe to run by hand; does nothing when already current.
+
+set -uo pipefail
+
+REPO="dalmaer/plates"
+PREFIX="$HOME/.npm-global"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/plates-update"
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+command -v npm >/dev/null || { echo "plates-update: no npm on PATH"; exit 1; }
+command -v curl >/dev/null || { echo "plates-update: no curl on PATH"; exit 1; }
+
+api() { curl -fsSL --max-time 30 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/$1"; }
+json() { /usr/bin/python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+
+sha="$(api commits/main | json 'd["sha"]')" || { echo "plates-update: couldn't read $REPO main"; exit 1; }
+
+installed="$(cat "$STATE/commit" 2>/dev/null || true)"
+if [ "$sha" = "$installed" ] && [ -x "$PREFIX/bin/plates" ]; then
+  echo "plates-update: already at ${sha:0:8}"
+  exit 0
+fi
+
+# Only a commit whose `check` run passed: main can briefly hold a commit whose
+# CI is still running or red.
+check="$(api "commits/$sha/check-runs?check_name=check" \
+  | json '",".join(r["conclusion"] or r["status"] for r in d["check_runs"])')" || check=""
+if [ "$check" != "success" ]; then
+  echo "plates-update: ${sha:0:8} check is '${check:-missing}'; staying on ${installed:0:8}"
+  exit 0
+fi
+
+# A GitHub tarball, not a git URL: npm would clone over ssh, which needs a key
+# agent launchd doesn't have. --ignore-scripts as the Plates install docs say.
+npm install --global --prefix "$PREFIX" \
+  "https://codeload.github.com/$REPO/tar.gz/$sha" \
+  --ignore-scripts --no-audit --no-fund >/dev/null \
+  || { echo "plates-update: npm install of ${sha:0:8} failed"; exit 1; }
+
+version="$("$PREFIX/bin/plates" --version 2>&1)" \
+  || { echo "plates-update: installed ${sha:0:8} but plates won't run: $version"; exit 1; }
+mkdir -p "$STATE"
+echo "$sha" > "$STATE/commit"
+echo "plates-update: ${installed:0:8} -> ${sha:0:8} ($version)"
