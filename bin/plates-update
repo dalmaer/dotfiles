@@ -27,8 +27,14 @@ json() { /usr/bin/python3 -c "import json,sys; d=json.load(sys.stdin); print($1)
 
 sha="$(api commits/main | json 'd["sha"]')" || { echo "plates-update: couldn't read $REPO main"; exit 1; }
 
+# Plates still ships `keel`, its old name, as a second command for projects
+# that haven't moved over (some CI workflows call it). Locally it's just
+# plates under another name, so every install drops it again.
+drop_keel() { rm -f "$PREFIX/bin/keel"; }
+
 installed="$(cat "$STATE/commit" 2>/dev/null || true)"
 if [ "$sha" = "$installed" ] && [ -x "$PREFIX/bin/plates" ]; then
+  drop_keel
   echo "plates-update: already at ${sha:0:8}"
   exit 0
 fi
@@ -48,6 +54,7 @@ npm install --global --prefix "$PREFIX" \
   "https://codeload.github.com/$REPO/tar.gz/$sha" \
   --ignore-scripts --no-audit --no-fund >/dev/null \
   || { echo "plates-update: npm install of ${sha:0:8} failed"; exit 1; }
+drop_keel
 
 version="$("$PREFIX/bin/plates" --version 2>&1)" \
   || { echo "plates-update: installed ${sha:0:8} but plates won't run: $version"; exit 1; }
