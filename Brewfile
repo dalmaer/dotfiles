@@ -7,6 +7,7 @@
 # --- Shell -------------------------------------------------------------
 brew "starship"
 brew "zsh-completions"
+brew "node"                # the newest Node release, upgraded nightly; fnm for per-project versions
 brew "fnm"                 # Node versions; corepack comes with each Node
 brew "tmux"
 brew "mosh"
